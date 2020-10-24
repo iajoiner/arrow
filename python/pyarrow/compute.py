@@ -15,18 +15,206 @@
 # specific language governing permissions and limitations
 # under the License.
 
-
 from pyarrow._compute import (  # noqa
-    FilterOptions,
     Function,
+    FunctionOptions,
     FunctionRegistry,
+    Kernel,
+    ScalarAggregateFunction,
+    ScalarAggregateKernel,
+    ScalarFunction,
+    ScalarKernel,
+    VectorFunction,
+    VectorKernel,
+    # Option classes
+    CastOptions,
+    CountOptions,
+    FilterOptions,
+    MatchSubstringOptions,
+    SplitOptions,
+    SplitPatternOptions,
+    MinMaxOptions,
+    PartitionNthOptions,
+    SetLookupOptions,
+    StrptimeOptions,
+    TakeOptions,
+    VarianceOptions,
+    # Functions
     function_registry,
     call_function,
-    TakeOptions
+    get_function,
+    list_functions,
 )
 
+from textwrap import dedent
+import warnings
+
 import pyarrow as pa
-import pyarrow._compute as _pc
+
+
+def _get_arg_names(func):
+    arg_names = func._doc.arg_names
+    if not arg_names:
+        if func.arity == 1:
+            arg_names = ["arg"]
+        elif func.arity == 2:
+            arg_names = ["left", "right"]
+        else:
+            raise NotImplementedError(
+                "unsupported arity: {}".format(func.arity))
+
+    return arg_names
+
+
+def _decorate_compute_function(wrapper, exposed_name, func, option_class):
+    wrapper.__arrow_compute_function__ = dict(name=func.name,
+                                              arity=func.arity)
+    wrapper.__name__ = exposed_name
+    wrapper.__qualname__ = exposed_name
+
+    doc_pieces = []
+
+    cpp_doc = func._doc
+    summary = cpp_doc.summary
+    if not summary:
+        arg_str = "arguments" if func.arity > 1 else "argument"
+        summary = ("Call compute function {!r} with the given {}"
+                   .format(func.name, arg_str))
+
+    description = cpp_doc.description
+    arg_names = _get_arg_names(func)
+
+    doc_pieces.append("""\
+        {}.
+
+        """.format(summary))
+
+    if description:
+        doc_pieces.append("{}\n\n".format(description))
+
+    doc_pieces.append("""\
+        Parameters
+        ----------
+        """)
+
+    for arg_name in arg_names:
+        if func.kind in ('vector', 'scalar_aggregate'):
+            arg_type = 'Array-like'
+        else:
+            arg_type = 'Array-like or scalar-like'
+        doc_pieces.append("""\
+            {} : {}
+                Argument to compute function
+            """.format(arg_name, arg_type))
+
+    doc_pieces.append("""\
+        memory_pool : pyarrow.MemoryPool, optional
+            If not passed, will allocate memory from the default memory pool.
+        """)
+    if option_class is not None:
+        doc_pieces.append("""\
+            options : pyarrow.compute.{0}, optional
+                Parameters altering compute function semantics
+            **kwargs: optional
+                Parameters for {0} constructor.  Either `options`
+                or `**kwargs` can be passed, but not both at the same time.
+            """.format(option_class.__name__))
+
+    wrapper.__doc__ = "".join(dedent(s) for s in doc_pieces)
+    return wrapper
+
+
+def _get_options_class(func):
+    class_name = func._doc.options_class
+    if not class_name:
+        return None
+    try:
+        return globals()[class_name]
+    except KeyError:
+        warnings.warn("Python binding for {} not exposed"
+                      .format(class_name), RuntimeWarning)
+        return None
+
+
+def _handle_options(name, option_class, options, kwargs):
+    if kwargs:
+        if options is None:
+            return option_class(**kwargs)
+        raise TypeError(
+            "Function {!r} called with both an 'options' argument "
+            "and additional named arguments"
+            .format(name))
+
+    if options is not None:
+        if isinstance(options, dict):
+            return option_class(**options)
+        elif isinstance(options, option_class):
+            return options
+        raise TypeError(
+            "Function {!r} expected a {} parameter, got {}"
+            .format(name, option_class, type(options)))
+
+    return options
+
+
+_wrapper_template = dedent("""\
+    def make_wrapper(func, option_class):
+        def {func_name}({args_sig}, *, memory_pool=None):
+            return func.call([{args_sig}], None, memory_pool)
+        return {func_name}
+    """)
+
+_wrapper_options_template = dedent("""\
+    def make_wrapper(func, option_class):
+        def {func_name}({args_sig}, *, options=None, memory_pool=None,
+                        **kwargs):
+            options = _handle_options({func_name!r}, option_class, options,
+                                      kwargs)
+            return func.call([{args_sig}], options, memory_pool)
+        return {func_name}
+    """)
+
+
+def _wrap_function(name, func):
+    option_class = _get_options_class(func)
+    arg_names = _get_arg_names(func)
+    args_sig = ', '.join(arg_names)
+
+    # Generate templated wrapper, so that the signature matches
+    # the documented argument names.
+    ns = {}
+    if option_class is not None:
+        template = _wrapper_options_template
+    else:
+        template = _wrapper_template
+    exec(template.format(func_name=name, args_sig=args_sig), globals(), ns)
+    wrapper = ns['make_wrapper'](func, option_class)
+
+    return _decorate_compute_function(wrapper, name, func, option_class)
+
+
+def _make_global_functions():
+    """
+    Make global functions wrapping each compute function.
+
+    Note that some of the automatically-generated wrappers may be overriden
+    by custom versions below.
+    """
+    g = globals()
+    reg = function_registry()
+
+    # Avoid clashes with Python keywords
+    rewrites = {'and': 'and_',
+                'or': 'or_'}
+
+    for cpp_name in reg.list_functions():
+        name = rewrites.get(cpp_name, cpp_name)
+        func = reg.get_function(cpp_name)
+        assert name not in g, name
+        g[cpp_name] = g[name] = _wrap_function(name, func)
+
+
+_make_global_functions()
 
 
 def cast(arr, target_type, safe=True):
@@ -81,73 +269,10 @@ def cast(arr, target_type, safe=True):
     if target_type is None:
         raise ValueError("Cast target type must not be None")
     if safe:
-        options = _pc.CastOptions.safe(target_type)
+        options = CastOptions.safe(target_type)
     else:
-        options = _pc.CastOptions.unsafe(target_type)
+        options = CastOptions.unsafe(target_type)
     return call_function("cast", [arr], options)
-
-
-def _decorate_compute_function(func, name, *, arity):
-    func.__arrow_compute_function__ = dict(name=name, arity=arity)
-    return func
-
-
-def _simple_unary_function(name):
-    def func(arg):
-        return call_function(name, [arg])
-    return _decorate_compute_function(func, name, arity=1)
-
-
-def _simple_binary_function(name):
-    def func(left, right):
-        return call_function(name, [left, right])
-    return _decorate_compute_function(func, name, arity=2)
-
-
-binary_length = _simple_unary_function('binary_length')
-ascii_upper = _simple_unary_function('ascii_upper')
-ascii_lower = _simple_unary_function('ascii_lower')
-utf8_upper = _simple_unary_function('utf8_upper')
-utf8_lower = _simple_unary_function('utf8_lower')
-
-string_is_ascii = _simple_unary_function('string_is_ascii')
-
-ascii_is_alnum = _simple_unary_function('ascii_is_alnum')
-utf8_is_alnum = _simple_unary_function('utf8_is_alnum')
-ascii_is_alpha = _simple_unary_function('ascii_is_alpha')
-utf8_is_alpha = _simple_unary_function('utf8_is_alpha')
-ascii_is_decimal = _simple_unary_function('ascii_is_decimal')
-utf8_is_decimal = _simple_unary_function('utf8_is_decimal')
-ascii_is_digit = ascii_is_decimal  # alias
-utf8_is_digit = _simple_unary_function('utf8_is_digit')
-ascii_is_lower = _simple_unary_function('ascii_is_lower')
-utf8_is_lower = _simple_unary_function('utf8_is_lower')
-ascii_is_numeric = ascii_is_decimal  # alias
-utf8_is_numeric = _simple_unary_function('utf8_is_numeric')
-ascii_is_printable = _simple_unary_function('ascii_is_printable')
-utf8_is_printable = _simple_unary_function('utf8_is_printable')
-ascii_is_title = _simple_unary_function('ascii_is_title')
-utf8_is_title = _simple_unary_function('utf8_is_title')
-ascii_is_upper = _simple_unary_function('ascii_is_upper')
-utf8_is_upper = _simple_unary_function('utf8_is_upper')
-
-is_valid = _simple_unary_function('is_valid')
-is_null = _simple_unary_function('is_null')
-
-list_flatten = _simple_unary_function('list_flatten')
-list_parent_indices = _simple_unary_function('list_parent_indices')
-list_value_length = _simple_unary_function('list_value_length')
-
-add = _simple_binary_function('add')
-subtract = _simple_binary_function('subtract')
-multiply = _simple_binary_function('multiply')
-
-equal = _simple_binary_function('equal')
-not_equal = _simple_binary_function('not_equal')
-greater = _simple_binary_function('greater')
-greater_equal = _simple_binary_function('greater_equal')
-less = _simple_binary_function('less')
-less_equal = _simple_binary_function('less_equal')
 
 
 def match_substring(array, pattern):
@@ -165,7 +290,7 @@ def match_substring(array, pattern):
     result : pyarrow.Array or pyarrow.ChunkedArray
     """
     return call_function("match_substring", [array],
-                         _pc.MatchSubstringOptions(pattern))
+                         MatchSubstringOptions(pattern))
 
 
 def sum(array):
@@ -181,6 +306,32 @@ def sum(array):
     sum : pyarrow.Scalar
     """
     return call_function('sum', [array])
+
+
+def mode(array):
+    """
+    Return the mode (most common value) of a passed numerical
+    (chunked) array. If there is more than one such value, only
+    the smallest is returned.
+
+    Parameters
+    ----------
+    array : pyarrow.Array or pyarrow.ChunkedArray
+
+    Returns
+    -------
+    mode : pyarrow.StructScalar
+
+    Examples
+    --------
+    >>> import pyarrow as pa
+    >>> import pyarrow.compute as pc
+    >>> arr = pa.array([1, 1, 2, 2, 3, 2, 2, 2])
+    >>> pc.mode(arr)
+    <pyarrow.StructScalar: {'mode': 2, 'count': 5}>
+
+    """
+    return call_function("mode", [array])
 
 
 def filter(data, mask, null_selection_behavior='drop'):
@@ -227,7 +378,7 @@ def filter(data, mask, null_selection_behavior='drop'):
     return call_function('filter', [data, mask], options)
 
 
-def take(data, indices, boundscheck=True):
+def take(data, indices, *, boundscheck=True, memory_pool=None):
     """
     Select values (or records) from array- or table-like data given integer
     selection indices.
@@ -264,8 +415,8 @@ def take(data, indices, boundscheck=True):
       null
     ]
     """
-    options = TakeOptions(boundscheck)
-    return call_function('take', [data, indices], options)
+    options = TakeOptions(boundscheck=boundscheck)
+    return call_function('take', [data, indices], options, memory_pool)
 
 
 def fill_null(values, fill_value):

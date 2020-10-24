@@ -15,9 +15,15 @@
 # specific language governing permissions and limitations
 # under the License.
 
+from datetime import datetime
 from functools import lru_cache
-import numpy as np
+import inspect
+import pickle
 import pytest
+import random
+import textwrap
+
+import numpy as np
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -50,6 +56,13 @@ exported_functions = [
     if hasattr(func, '__arrow_compute_function__')]
 
 
+exported_option_classes = [
+    cls for (name, cls) in sorted(pc.__dict__.items())
+    if (isinstance(cls, type) and
+        cls is not pc.FunctionOptions and
+        issubclass(cls, pc.FunctionOptions))]
+
+
 numerical_arrow_types = [
     pa.int8(),
     pa.int16(),
@@ -70,11 +83,111 @@ def test_exported_functions():
     functions = exported_functions
     assert len(functions) >= 10
     for func in functions:
-        args = [None] * func.__arrow_compute_function__['arity']
+        args = [object()] * func.__arrow_compute_function__['arity']
         with pytest.raises(TypeError,
                            match="Got unexpected argument type "
-                                 "<class 'NoneType'> for compute function"):
+                                 "<class 'object'> for compute function"):
             func(*args)
+
+
+def test_exported_option_classes():
+    classes = exported_option_classes
+    assert len(classes) >= 10
+    for cls in classes:
+        # Option classes must have an introspectable constructor signature,
+        # and that signature should not have any *args or **kwargs.
+        sig = inspect.signature(cls)
+        for param in sig.parameters.values():
+            assert param.kind not in (param.VAR_POSITIONAL,
+                                      param.VAR_KEYWORD)
+
+
+def test_list_functions():
+    assert len(pc.list_functions()) > 10
+    assert "add" in pc.list_functions()
+
+
+def _check_get_function(name, expected_func_cls, expected_ker_cls,
+                        min_num_kernels=1):
+    func = pc.get_function(name)
+    assert isinstance(func, expected_func_cls)
+    n = func.num_kernels
+    assert n >= min_num_kernels
+    assert n == len(func.kernels)
+    assert all(isinstance(ker, expected_ker_cls) for ker in func.kernels)
+
+
+def test_get_function_scalar():
+    _check_get_function("add", pc.ScalarFunction, pc.ScalarKernel, 8)
+
+
+def test_get_function_vector():
+    _check_get_function("unique", pc.VectorFunction, pc.VectorKernel, 8)
+
+
+def test_get_function_aggregate():
+    _check_get_function("mean", pc.ScalarAggregateFunction,
+                        pc.ScalarAggregateKernel, 8)
+
+
+def test_call_function_with_memory_pool():
+    arr = pa.array(["foo", "bar", "baz"])
+    indices = np.array([2, 2, 1])
+    result1 = arr.take(indices)
+    result2 = pc.call_function('take', [arr, indices],
+                               memory_pool=pa.default_memory_pool())
+    expected = pa.array(["baz", "baz", "bar"])
+    assert result1.equals(expected)
+    assert result2.equals(expected)
+
+    result3 = pc.take(arr, indices, memory_pool=pa.default_memory_pool())
+    assert result3.equals(expected)
+
+
+def test_pickle_functions():
+    # Pickle registered functions
+    for name in pc.list_functions():
+        func = pc.get_function(name)
+        reconstructed = pickle.loads(pickle.dumps(func))
+        assert type(reconstructed) is type(func)
+        assert reconstructed.name == func.name
+        assert reconstructed.arity == func.arity
+        assert reconstructed.num_kernels == func.num_kernels
+
+
+def test_pickle_global_functions():
+    # Pickle global wrappers (manual or automatic) of registered functions
+    for name in pc.list_functions():
+        func = getattr(pc, name)
+        reconstructed = pickle.loads(pickle.dumps(func))
+        assert reconstructed is func
+
+
+def test_function_attributes():
+    # Sanity check attributes of registered functions
+    for name in pc.list_functions():
+        func = pc.get_function(name)
+        assert isinstance(func, pc.Function)
+        assert func.name == name
+        kernels = func.kernels
+        assert func.num_kernels == len(kernels)
+        assert all(isinstance(ker, pc.Kernel) for ker in kernels)
+        assert func.arity >= 1  # no varargs functions for now
+        repr(func)
+        for ker in kernels:
+            repr(ker)
+
+
+def test_input_type_conversion():
+    # Automatic array conversion from Python
+    arr = pc.add([1, 2], [4, None])
+    assert arr.to_pylist() == [5, None]
+    # Automatic scalar conversion from Python
+    arr = pc.add([1, 2], 4)
+    assert arr.to_pylist() == [5, 6]
+    # Other scalar type
+    assert pc.equal(["foo", "bar", None],
+                    "foo").to_pylist() == [True, False, None]
 
 
 @pytest.mark.parametrize('arrow_type', numerical_arrow_types)
@@ -109,11 +222,168 @@ def test_sum_chunked_array(arrow_type):
     assert pc.sum(arr).as_py() is None  # noqa: E711
 
 
+def test_mode_array():
+    # ARROW-9917
+    arr = pa.array([1, 1, 3, 4, 3, 5], type='int64')
+    expected = {"mode": 1, "count": 2}
+    assert pc.mode(arr).as_py() == {"mode": 1, "count": 2}
+
+    arr = pa.array([], type='int64')
+    expected = {"mode": None, "count": None}
+    assert pc.mode(arr).as_py() == expected
+
+
+def test_mode_chunked_array():
+    # ARROW-9917
+    arr = pa.chunked_array([pa.array([1, 1, 3, 4, 3, 5], type='int64')])
+    expected = {"mode": 1, "count": 2}
+    assert pc.mode(arr).as_py() == expected
+
+    arr = pa.chunked_array((), type='int64')
+    expected = {"mode": None, "count": None}
+    assert arr.num_chunks == 0
+    assert pc.mode(arr).as_py() == expected
+
+
+def test_variance():
+    data = [1, 2, 3, 4, 5, 6, 7, 8]
+    assert pc.variance(data).as_py() == 5.25
+    assert pc.variance(data, ddof=0).as_py() == 5.25
+    assert pc.variance(data, ddof=1).as_py() == 6.0
+
+
 def test_match_substring():
     arr = pa.array(["ab", "abc", "ba", None])
     result = pc.match_substring(arr, "ab")
     expected = pa.array([True, True, False, None])
     assert expected.equals(result)
+
+
+def test_split_pattern():
+    arr = pa.array(["-foo---bar--", "---foo---b"])
+    result = pc.split_pattern(arr, pattern="---")
+    expected = pa.array([["-foo", "bar--"], ["", "foo", "b"]])
+    assert expected.equals(result)
+
+    result = pc.split_pattern(arr, pattern="---", max_splits=1)
+    expected = pa.array([["-foo", "bar--"], ["", "foo---b"]])
+    assert expected.equals(result)
+
+    result = pc.split_pattern(arr, pattern="---", max_splits=1, reverse=True)
+    expected = pa.array([["-foo", "bar--"], ["---foo", "b"]])
+    assert expected.equals(result)
+
+
+def test_split_whitespace_utf8():
+    arr = pa.array(["foo bar", " foo  \u3000\tb"])
+    result = pc.utf8_split_whitespace(arr)
+    expected = pa.array([["foo", "bar"], ["", "foo", "b"]])
+    assert expected.equals(result)
+
+    result = pc.utf8_split_whitespace(arr, max_splits=1)
+    expected = pa.array([["foo", "bar"], ["", "foo  \u3000\tb"]])
+    assert expected.equals(result)
+
+    result = pc.utf8_split_whitespace(arr, max_splits=1, reverse=True)
+    expected = pa.array([["foo", "bar"], [" foo", "b"]])
+    assert expected.equals(result)
+
+
+def test_split_whitespace_ascii():
+    arr = pa.array(["foo bar", " foo  \u3000\tb"])
+    result = pc.ascii_split_whitespace(arr)
+    expected = pa.array([["foo", "bar"], ["", "foo", "\u3000", "b"]])
+    assert expected.equals(result)
+
+    result = pc.ascii_split_whitespace(arr, max_splits=1)
+    expected = pa.array([["foo", "bar"], ["", "foo  \u3000\tb"]])
+    assert expected.equals(result)
+
+    result = pc.ascii_split_whitespace(arr, max_splits=1, reverse=True)
+    expected = pa.array([["foo", "bar"], [" foo  \u3000", "b"]])
+    assert expected.equals(result)
+
+
+def test_min_max():
+    # An example generated function wrapper with possible options
+    data = [4, 5, 6, None, 1]
+    s = pc.min_max(data)
+    assert s.as_py() == {'min': 1, 'max': 6}
+    s = pc.min_max(data, options=pc.MinMaxOptions())
+    assert s.as_py() == {'min': 1, 'max': 6}
+    s = pc.min_max(data, options=pc.MinMaxOptions(null_handling='skip'))
+    assert s.as_py() == {'min': 1, 'max': 6}
+    s = pc.min_max(data, options=pc.MinMaxOptions(null_handling='emit_null'))
+    assert s.as_py() == {'min': None, 'max': None}
+
+    # Options as dict of kwargs
+    s = pc.min_max(data, options={'null_handling': 'emit_null'})
+    assert s.as_py() == {'min': None, 'max': None}
+    # Options as named functions arguments
+    s = pc.min_max(data, null_handling='emit_null')
+    assert s.as_py() == {'min': None, 'max': None}
+
+    # Both options and named arguments
+    with pytest.raises(TypeError):
+        s = pc.min_max(data, options=pc.MinMaxOptions(),
+                       null_handling='emit_null')
+
+    # Wrong options type
+    options = pc.TakeOptions()
+    with pytest.raises(TypeError):
+        s = pc.min_max(data, options=options)
+
+    # Missing argument
+    with pytest.raises(
+            TypeError,
+            match=r"min_max\(\) missing 1 required positional argument"):
+        s = pc.min_max()
+
+
+def test_is_valid():
+    # An example generated function wrapper without options
+    data = [4, 5, None]
+    assert pc.is_valid(data).to_pylist() == [True, True, False]
+
+    with pytest.raises(TypeError):
+        pc.is_valid(data, options=None)
+
+
+def test_generated_docstrings():
+    assert pc.min_max.__doc__ == textwrap.dedent("""\
+        Compute the minimum and maximum values of a numeric array.
+
+        Null values are ignored by default.
+        This can be changed through MinMaxOptions.
+
+        Parameters
+        ----------
+        array : Array-like
+            Argument to compute function
+        memory_pool : pyarrow.MemoryPool, optional
+            If not passed, will allocate memory from the default memory pool.
+        options : pyarrow.compute.MinMaxOptions, optional
+            Parameters altering compute function semantics
+        **kwargs: optional
+            Parameters for MinMaxOptions constructor.  Either `options`
+            or `**kwargs` can be passed, but not both at the same time.
+        """)
+    assert pc.add.__doc__ == textwrap.dedent("""\
+        Add the arguments element-wise.
+
+        Results will wrap around on integer overflow.
+        Use function "add_checked" if you want overflow
+        to return an error.
+
+        Parameters
+        ----------
+        x : Array-like or scalar-like
+            Argument to compute function
+        y : Array-like or scalar-like
+            Argument to compute function
+        memory_pool : pyarrow.MemoryPool, optional
+            If not passed, will allocate memory from the default memory pool.
+        """)
 
 
 # We use isprintable to find about codepoints that Python doesn't know, but
@@ -234,11 +504,13 @@ def test_string_py_compat_boolean(function_name, variant):
         # the issues we know of, we skip
         if i in ignore:
             continue
+        # Compare results with the equivalent Python predicate
+        # (except "is_space" where functions are known to be incompatible)
         c = chr(i)
-        if hasattr(pc, arrow_name):
+        if hasattr(pc, arrow_name) and function_name != 'is_space':
             ar = pa.array([c])
-            assert getattr(pc, arrow_name)(
-                ar)[0].as_py() == getattr(c, py_name)()
+            arrow_func = getattr(pc, arrow_name)
+            assert arrow_func(ar)[0].as_py() == getattr(c, py_name)()
 
 
 @pytest.mark.parametrize(('ty', 'values'), all_array_types)
@@ -322,17 +594,6 @@ def test_take_on_chunked_array():
     assert result.equals(expected)
 
 
-def test_call_function_with_memory_pool():
-    arr = pa.array(["foo", "bar", "baz"])
-    indices = np.array([2, 2, 1])
-    result1 = arr.take(indices)
-    result2 = pc.call_function('take', [arr, indices],
-                               memory_pool=pa.default_memory_pool())
-    expected = pa.array(["baz", "baz", "bar"])
-    assert result1.equals(expected)
-    assert result2.equals(expected)
-
-
 @pytest.mark.parametrize('ordered', [False, True])
 def test_take_dictionary(ordered):
     arr = pa.DictionaryArray.from_arrays([0, 1, 2, 0, 1, 2], ['a', 'b', 'c'],
@@ -342,6 +603,20 @@ def test_take_dictionary(ordered):
     assert result.to_pylist() == ['a', 'b', 'a']
     assert result.dictionary.to_pylist() == ['a', 'b', 'c']
     assert result.type.ordered is ordered
+
+
+def test_take_null_type():
+    # ARROW-10027
+    arr = pa.array([None] * 10)
+    chunked_arr = pa.chunked_array([[None] * 5] * 2)
+    batch = pa.record_batch([arr], names=['a'])
+    table = pa.table({'a': arr})
+
+    indices = pa.array([1, 3, 7, None])
+    assert len(arr.take(indices)) == 4
+    assert len(chunked_arr.take(indices)) == 4
+    assert len(batch.take(indices).column(0)) == 4
+    assert len(table.take(indices).column(0)) == 4
 
 
 @pytest.mark.parametrize(('ty', 'values'), all_array_types)
@@ -437,6 +712,20 @@ def test_filter_errors():
         with pytest.raises(pa.ArrowInvalid,
                            match="must all be the same length"):
             obj.filter(mask)
+
+
+def test_filter_null_type():
+    # ARROW-10027
+    arr = pa.array([None] * 10)
+    chunked_arr = pa.chunked_array([[None] * 5] * 2)
+    batch = pa.record_batch([arr], names=['a'])
+    table = pa.table({'a': arr})
+
+    mask = pa.array([True, False] * 5)
+    assert len(arr.filter(mask)) == 5
+    assert len(chunked_arr.filter(mask)) == 5
+    assert len(batch.filter(mask).column(0)) == 5
+    assert len(table.filter(mask).column(0)) == 5
 
 
 @pytest.mark.parametrize("typ", ["array", "chunked_array"])
@@ -562,7 +851,7 @@ def test_is_null():
 def test_fill_null():
     arr = pa.array([1, 2, None, 4], type=pa.int8())
     fill_value = pa.array([5], type=pa.int8())
-    with pytest.raises(TypeError):
+    with pytest.raises(pa.ArrowInvalid, match="tried to convert to int"):
         arr.fill_null(fill_value)
 
     arr = pa.array([None, None, None, None], type=pa.null())
@@ -620,3 +909,63 @@ def test_fill_null_chunked_array(arrow_type):
 
     result = arr.fill_null(pa.scalar(5, type='int8'))
     assert result.equals(expected)
+
+
+def test_logical():
+    a = pa.array([True, False, False, None])
+    b = pa.array([True, True, False, True])
+
+    assert pc.and_(a, b) == pa.array([True, False, False, None])
+    assert pc.and_kleene(a, b) == pa.array([True, False, False, None])
+
+    assert pc.or_(a, b) == pa.array([True, True, False, None])
+    assert pc.or_kleene(a, b) == pa.array([True, True, False, True])
+
+    assert pc.xor(a, b) == pa.array([False, True, False, None])
+
+    assert pc.invert(a) == pa.array([False, True, True, None])
+
+
+def test_cast():
+    arr = pa.array([2**63 - 1], type='int64')
+
+    with pytest.raises(pa.ArrowInvalid):
+        pc.cast(arr, 'int32')
+
+    assert pc.cast(arr, 'int32', safe=False) == pa.array([-1], type='int32')
+
+    arr = pa.array([datetime(2010, 1, 1), datetime(2015, 1, 1)])
+    expected = pa.array([1262304000000, 1420070400000], type='timestamp[ms]')
+    assert pc.cast(arr, 'timestamp[ms]') == expected
+
+
+def test_strptime():
+    arr = pa.array(["5/1/2020", None, "12/13/1900"])
+
+    got = pc.strptime(arr, format='%m/%d/%Y', unit='s')
+    expected = pa.array([datetime(2020, 5, 1), None, datetime(1900, 12, 13)],
+                        type=pa.timestamp('s'))
+    assert got == expected
+
+
+def test_count():
+    arr = pa.array([1, 2, 3, None, None])
+    assert pc.count(arr).as_py() == 3
+    assert pc.count(arr, count_mode='count_non_null').as_py() == 3
+    assert pc.count(arr, count_mode='count_null').as_py() == 2
+
+    with pytest.raises(ValueError, match="'zzz' is not a valid count_mode"):
+        pc.count(arr, count_mode='zzz')
+
+
+def test_partition_nth():
+    data = list(range(100, 140))
+    random.shuffle(data)
+    pivot = 10
+    indices = pc.partition_nth_indices(data, pivot=pivot).to_pylist()
+    assert len(indices) == len(data)
+    assert sorted(indices) == list(range(len(data)))
+    assert all(data[indices[i]] <= data[indices[pivot]]
+               for i in range(pivot))
+    assert all(data[indices[i]] >= data[indices[pivot]]
+               for i in range(pivot, len(data)))

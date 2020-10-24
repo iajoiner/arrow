@@ -353,6 +353,10 @@ class RangeEqualsVisitor {
     return Visit(checked_cast<const FixedSizeBinaryArray&>(left));
   }
 
+  Status Visit(const Decimal256Array& left) {
+    return Visit(checked_cast<const FixedSizeBinaryArray&>(left));
+  }
+
   Status Visit(const NullArray& left) {
     ARROW_UNUSED(left);
     result_ = true;
@@ -806,6 +810,12 @@ class TypeEqualsVisitor {
     return Status::OK();
   }
 
+  Status Visit(const Decimal256Type& left) {
+    const auto& right = checked_cast<const Decimal256Type&>(right_);
+    result_ = left.precision() == right.precision() && left.scale() == right.scale();
+    return Status::OK();
+  }
+
   template <typename T>
   enable_if_t<is_list_like_type<T>::value || is_struct_type<T>::value, Status> Visit(
       const T& left) {
@@ -862,7 +872,9 @@ class TypeEqualsVisitor {
 
 class ScalarEqualsVisitor {
  public:
-  explicit ScalarEqualsVisitor(const Scalar& right) : right_(right), result_(false) {}
+  explicit ScalarEqualsVisitor(const Scalar& right,
+                               const EqualOptions& opts = EqualOptions::Defaults())
+      : right_(right), result_(false), options_(opts) {}
 
   Status Visit(const NullScalar& left) {
     result_ = true;
@@ -876,8 +888,25 @@ class ScalarEqualsVisitor {
   }
 
   template <typename T>
+  typename std::enable_if<std::is_base_of<FloatScalar, T>::value ||
+                              std::is_base_of<DoubleScalar, T>::value,
+                          Status>::type
+  Visit(const T& left_) {
+    const auto& right = checked_cast<const T&>(right_);
+    if (options_.nans_equal()) {
+      result_ = right.value == left_.value ||
+                (std::isnan(right.value) && std::isnan(left_.value));
+    } else {
+      result_ = right.value == left_.value;
+    }
+    return Status::OK();
+  }
+
+  template <typename T>
   typename std::enable_if<
-      std::is_base_of<internal::PrimitiveScalar<typename T::TypeClass>, T>::value ||
+      (std::is_base_of<internal::PrimitiveScalar<typename T::TypeClass>, T>::value &&
+       !std::is_base_of<FloatScalar, T>::value &&
+       !std::is_base_of<DoubleScalar, T>::value) ||
           std::is_base_of<TemporalScalar<typename T::TypeClass>, T>::value,
       Status>::type
   Visit(const T& left_) {
@@ -896,6 +925,12 @@ class ScalarEqualsVisitor {
 
   Status Visit(const Decimal128Scalar& left) {
     const auto& right = checked_cast<const Decimal128Scalar&>(right_);
+    result_ = left.value == right.value;
+    return Status::OK();
+  }
+
+  Status Visit(const Decimal256Scalar& left) {
+    const auto& right = checked_cast<const Decimal256Scalar&>(right_);
     result_ = left.value == right.value;
     return Status::OK();
   }
@@ -968,6 +1003,7 @@ class ScalarEqualsVisitor {
  protected:
   const Scalar& right_;
   bool result_;
+  const EqualOptions options_;
 };
 
 Status PrintDiff(const Array& left, const Array& right, std::ostream* os) {
@@ -1386,7 +1422,7 @@ bool TypeEquals(const DataType& left, const DataType& right, bool check_metadata
   }
 }
 
-bool ScalarEquals(const Scalar& left, const Scalar& right) {
+bool ScalarEquals(const Scalar& left, const Scalar& right, const EqualOptions& options) {
   bool are_equal = false;
   if (&left == &right) {
     are_equal = true;
@@ -1395,7 +1431,7 @@ bool ScalarEquals(const Scalar& left, const Scalar& right) {
   } else if (left.is_valid != right.is_valid) {
     are_equal = false;
   } else {
-    ScalarEqualsVisitor visitor(right);
+    ScalarEqualsVisitor visitor(right, options);
     auto error = VisitScalarInline(left, &visitor);
     DCHECK_OK(error);
     are_equal = visitor.result();

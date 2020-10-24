@@ -49,6 +49,25 @@ struct ARROW_EXPORT MatchSubstringOptions : public FunctionOptions {
   std::string pattern;
 };
 
+struct ARROW_EXPORT SplitOptions : public FunctionOptions {
+  explicit SplitOptions(int64_t max_splits = -1, bool reverse = false)
+      : max_splits(max_splits), reverse(reverse) {}
+
+  /// Maximum number of splits allowed, or unlimited when -1
+  int64_t max_splits;
+  /// Start splitting from the end of the string (only relevant when max_splits != -1)
+  bool reverse;
+};
+
+struct ARROW_EXPORT SplitPatternOptions : public SplitOptions {
+  explicit SplitPatternOptions(std::string pattern, int64_t max_splits = -1,
+                               bool reverse = false)
+      : SplitOptions(max_splits, reverse), pattern(std::move(pattern)) {}
+
+  /// The exact substring to look for inside input values.
+  std::string pattern;
+};
+
 /// Options for IsIn and IndexIn functions
 struct ARROW_EXPORT SetLookupOptions : public FunctionOptions {
   explicit SetLookupOptions(Datum value_set, bool skip_nulls)
@@ -128,6 +147,20 @@ ARROW_EXPORT
 Result<Datum> Multiply(const Datum& left, const Datum& right,
                        ArithmeticOptions options = ArithmeticOptions(),
                        ExecContext* ctx = NULLPTR);
+
+/// \brief Divide two values. Array values must be the same length. If either
+/// argument is null the result will be null. For integer types, if there is
+/// a zero divisor, an error will be raised.
+///
+/// \param[in] left the dividend
+/// \param[in] right the divisor
+/// \param[in] options arithmetic options (enable/disable overflow checking), optional
+/// \param[in] ctx the function execution context, optional
+/// \return the elementwise quotient
+ARROW_EXPORT
+Result<Datum> Divide(const Datum& left, const Datum& right,
+                     ArithmeticOptions options = ArithmeticOptions(),
+                     ExecContext* ctx = NULLPTR);
 
 /// \brief Compare a numeric array with a scalar.
 ///

@@ -19,9 +19,11 @@
 
 use crate::arrow::record_batch::RecordBatch;
 use crate::error::Result;
-use crate::logicalplan::{Expr, LogicalPlan};
+use crate::logical_plan::{Expr, FunctionRegistry, LogicalPlan};
 use arrow::datatypes::Schema;
 use std::sync::Arc;
+
+use async_trait::async_trait;
 
 /// DataFrame represents a logical set of rows with the same named columns.
 /// Similar to a [Pandas DataFrame](https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.DataFrame.html) or
@@ -41,12 +43,13 @@ use std::sync::Arc;
 /// let mut ctx = ExecutionContext::new();
 /// let df = ctx.read_csv("tests/example.csv", CsvReadOptions::new())?;
 /// let df = df.filter(col("a").lt_eq(col("b")))?
-///            .aggregate(vec![col("a")], vec![df.min(col("b"))?])?
+///            .aggregate(vec![col("a")], vec![min(col("b"))])?
 ///            .limit(100)?;
 /// let results = df.collect();
 /// # Ok(())
 /// # }
 /// ```
+#[async_trait]
 pub trait DataFrame {
     /// Filter the DataFrame by column. Returns a new DataFrame only containing the
     /// specified columns.
@@ -71,7 +74,7 @@ pub trait DataFrame {
     /// # fn main() -> Result<()> {
     /// let mut ctx = ExecutionContext::new();
     /// let df = ctx.read_csv("tests/example.csv", CsvReadOptions::new())?;
-    /// let df = df.select(vec![col("a").multiply(col("b")), col("c")])?;
+    /// let df = df.select(vec![col("a") * col("b"), col("c")])?;
     /// # Ok(())
     /// # }
     /// ```
@@ -101,10 +104,10 @@ pub trait DataFrame {
     /// let df = ctx.read_csv("tests/example.csv", CsvReadOptions::new())?;
     ///
     /// // The following use is the equivalent of "SELECT MIN(b) GROUP BY a"
-    /// let _ = df.aggregate(vec![col("a")], vec![df.min(col("b"))?])?;
+    /// let _ = df.aggregate(vec![col("a")], vec![min(col("b"))])?;
     ///
     /// // The following use is the equivalent of "SELECT MIN(b)"
-    /// let _ = df.aggregate(vec![], vec![df.min(col("b"))?])?;
+    /// let _ = df.aggregate(vec![], vec![min(col("b"))])?;
     /// # Ok(())
     /// # }
     /// ```
@@ -129,7 +132,7 @@ pub trait DataFrame {
     fn limit(&self, n: usize) -> Result<Arc<dyn DataFrame>>;
 
     /// Sort the DataFrame by the specified sorting expressions. Any expression can be turned into
-    /// a sort expression by calling its [sort](../logicalplan/enum.Expr.html#method.sort) method.
+    /// a sort expression by calling its [sort](../logical_plan/enum.Expr.html#method.sort) method.
     ///
     /// ```
     /// # use datafusion::prelude::*;
@@ -148,14 +151,15 @@ pub trait DataFrame {
     /// ```
     /// # use datafusion::prelude::*;
     /// # use datafusion::error::Result;
-    /// # fn main() -> Result<()> {
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<()> {
     /// let mut ctx = ExecutionContext::new();
     /// let df = ctx.read_csv("tests/example.csv", CsvReadOptions::new())?;
-    /// let batches = df.collect()?;
+    /// let batches = df.collect().await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn collect(&self) -> Result<Vec<RecordBatch>>;
+    async fn collect(&self) -> Result<Vec<RecordBatch>>;
 
     /// Returns the schema describing the output of this DataFrame in terms of columns returned,
     /// where each column has a name, data type, and nullability attribute.
@@ -175,18 +179,33 @@ pub trait DataFrame {
     /// Return the logical plan represented by this DataFrame.
     fn to_logical_plan(&self) -> LogicalPlan;
 
-    /// Create an expression to represent the min() aggregate function
-    fn min(&self, expr: Expr) -> Result<Expr>;
+    /// Return a DataFrame with the explanation of its plan so far.
+    ///
+    /// ```
+    /// # use datafusion::prelude::*;
+    /// # use datafusion::error::Result;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<()> {
+    /// let mut ctx = ExecutionContext::new();
+    /// let df = ctx.read_csv("tests/example.csv", CsvReadOptions::new())?;
+    /// let batches = df.limit(100)?.explain(false)?.collect().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn explain(&self, verbose: bool) -> Result<Arc<dyn DataFrame>>;
 
-    /// Create an expression to represent the max() aggregate function
-    fn max(&self, expr: Expr) -> Result<Expr>;
-
-    /// Create an expression to represent the sum() aggregate function
-    fn sum(&self, expr: Expr) -> Result<Expr>;
-
-    /// Create an expression to represent the avg() aggregate function
-    fn avg(&self, expr: Expr) -> Result<Expr>;
-
-    /// Create an expression to represent the count() aggregate function
-    fn count(&self, expr: Expr) -> Result<Expr>;
+    /// Return a `FunctionRegistry` used to plan udf's calls
+    ///
+    /// ```
+    /// # use datafusion::prelude::*;
+    /// # use datafusion::error::Result;
+    /// # fn main() -> Result<()> {
+    /// let mut ctx = ExecutionContext::new();
+    /// let df = ctx.read_csv("tests/example.csv", CsvReadOptions::new())?;
+    /// let f = df.registry();
+    /// // use f.udf("name", vec![...]) to use the udf
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn registry(&self) -> &dyn FunctionRegistry;
 }

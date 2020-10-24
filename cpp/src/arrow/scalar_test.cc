@@ -127,12 +127,29 @@ TYPED_TEST(TestNumericScalar, MakeScalar) {
   ASSERT_EQ(ScalarType(3), *three);
 }
 
-TEST(TestDecimalScalar, Basics) {
-  auto ty = decimal(3, 2);
+TEST(TestDecimal128Scalar, Basics) {
+  auto ty = decimal128(3, 2);
   auto pi = Decimal128Scalar(Decimal128("3.14"), ty);
   auto null = MakeNullScalar(ty);
 
   ASSERT_EQ(pi.value, Decimal128("3.14"));
+
+  // test Array.GetScalar
+  auto arr = ArrayFromJSON(ty, "[null, \"3.14\"]");
+  ASSERT_OK_AND_ASSIGN(auto first, arr->GetScalar(0));
+  ASSERT_OK_AND_ASSIGN(auto second, arr->GetScalar(1));
+  ASSERT_TRUE(first->Equals(null));
+  ASSERT_FALSE(first->Equals(pi));
+  ASSERT_TRUE(second->Equals(pi));
+  ASSERT_FALSE(second->Equals(null));
+}
+
+TEST(TestDecimal256Scalar, Basics) {
+  auto ty = decimal256(3, 2);
+  auto pi = Decimal256Scalar(Decimal256("3.14"), ty);
+  auto null = MakeNullScalar(ty);
+
+  ASSERT_EQ(pi.value, Decimal256("3.14"));
 
   // test Array.GetScalar
   auto arr = ArrayFromJSON(ty, "[null, \"3.14\"]");
@@ -567,7 +584,7 @@ TYPED_TEST(TestNumericScalar, Cast) {
     }
 
     ASSERT_OK_AND_ASSIGN(auto cast_from_string,
-                         StringScalar(repr.to_string()).CastTo(type));
+                         StringScalar(std::string(repr)).CastTo(type));
     ASSERT_EQ(*cast_from_string, *scalar);
 
     if (is_integer_type<TypeParam>::value) {
@@ -627,6 +644,8 @@ TEST(TestDictionaryScalar, Basics) {
     gamma.dictionary = dict;
 
     auto scalar_null = MakeNullScalar(ty);
+    checked_cast<DictionaryScalar&>(*scalar_null).value.dictionary = dict;
+
     auto scalar_alpha = DictionaryScalar(alpha, ty);
     auto scalar_gamma = DictionaryScalar(gamma, ty);
 
@@ -654,6 +673,12 @@ TEST(TestDictionaryScalar, Basics) {
     ASSERT_TRUE(first->Equals(scalar_gamma));
     ASSERT_TRUE(second->Equals(scalar_alpha));
     ASSERT_TRUE(last->Equals(scalar_null));
+
+    auto first_dict_scalar = checked_cast<const DictionaryScalar&>(*first);
+    ASSERT_TRUE(first_dict_scalar.value.dictionary->Equals(arr.dictionary()));
+
+    auto second_dict_scalar = checked_cast<const DictionaryScalar&>(*second);
+    ASSERT_TRUE(second_dict_scalar.value.dictionary->Equals(arr.dictionary()));
   }
 }
 

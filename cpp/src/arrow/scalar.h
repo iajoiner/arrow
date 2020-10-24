@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "arrow/compare.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
 #include "arrow/type.h"
@@ -61,7 +62,8 @@ struct ARROW_EXPORT Scalar : public util::EqualityComparable<Scalar> {
 
   using util::EqualityComparable<Scalar>::operator==;
   using util::EqualityComparable<Scalar>::Equals;
-  bool Equals(const Scalar& other) const;
+  bool Equals(const Scalar& other,
+              const EqualOptions& options = EqualOptions::Defaults()) const;
 
   struct ARROW_EXPORT Hash {
     size_t operator()(const Scalar& scalar) const { return hash(scalar); }
@@ -212,7 +214,7 @@ struct ARROW_EXPORT BaseBinaryScalar : public Scalar {
 
 struct ARROW_EXPORT BinaryScalar : public BaseBinaryScalar {
   using BaseBinaryScalar::BaseBinaryScalar;
-  using TypeClass = BinaryScalar;
+  using TypeClass = BinaryType;
 
   BinaryScalar(std::shared_ptr<Buffer> value, std::shared_ptr<DataType> type)
       : BaseBinaryScalar(std::move(value), std::move(type)) {}
@@ -237,7 +239,7 @@ struct ARROW_EXPORT StringScalar : public BinaryScalar {
 
 struct ARROW_EXPORT LargeBinaryScalar : public BaseBinaryScalar {
   using BaseBinaryScalar::BaseBinaryScalar;
-  using TypeClass = LargeBinaryScalar;
+  using TypeClass = LargeBinaryType;
 
   LargeBinaryScalar(std::shared_ptr<Buffer> value, std::shared_ptr<DataType> type)
       : BaseBinaryScalar(std::move(value), std::move(type)) {}
@@ -345,6 +347,17 @@ struct ARROW_EXPORT Decimal128Scalar : public Scalar {
   Decimal128 value;
 };
 
+struct ARROW_EXPORT Decimal256Scalar : public Scalar {
+  using Scalar::Scalar;
+  using TypeClass = Decimal256Type;
+  using ValueType = Decimal256;
+
+  Decimal256Scalar(Decimal256 value, std::shared_ptr<DataType> type)
+      : Scalar(std::move(type), true), value(value) {}
+
+  Decimal256 value;
+};
+
 struct ARROW_EXPORT BaseListScalar : public Scalar {
   using Scalar::Scalar;
   using ValueType = std::shared_ptr<Array>;
@@ -426,8 +439,8 @@ struct ARROW_EXPORT DictionaryScalar : public Scalar {
 
   explicit DictionaryScalar(std::shared_ptr<DataType> type);
 
-  DictionaryScalar(ValueType value, std::shared_ptr<DataType> type)
-      : Scalar(std::move(type), true), value(std::move(value)) {}
+  DictionaryScalar(ValueType value, std::shared_ptr<DataType> type, bool is_valid = true)
+      : Scalar(std::move(type), is_valid), value(std::move(value)) {}
 
   Result<std::shared_ptr<Scalar>> GetEncodedValue() const;
 };

@@ -90,7 +90,7 @@ where
     fn convert(&self, record_reader: &mut RecordReader<ParquetType>) -> Result<ArrayRef> {
         let record_data = record_reader.consume_record_data();
 
-        let mut array_data = ArrayDataBuilder::new(ArrowSourceType::get_data_type())
+        let mut array_data = ArrayDataBuilder::new(ArrowSourceType::DATA_TYPE)
             .len(record_reader.num_values())
             .add_buffer(record_data?);
 
@@ -101,7 +101,7 @@ where
         let primitive_array: ArrayRef =
             Arc::new(PrimitiveArray::<ArrowSourceType>::from(array_data.build()));
 
-        Ok(cast(&primitive_array, &ArrowTargetType::get_data_type())?)
+        Ok(cast(&primitive_array, &ArrowTargetType::DATA_TYPE)?)
     }
 }
 
@@ -385,12 +385,24 @@ mod tests {
         let mut record_reader = RecordReader::<T>::new(desc.clone());
 
         // Prepare record reader
-        let mut pb = DataPageBuilderImpl::new(desc.clone(), 4, true);
+        let mut pb = DataPageBuilderImpl::new(desc, 4, true);
         if rep_levels.is_some() {
-            pb.add_rep_levels(max_rep_level, rep_levels.unwrap());
+            pb.add_rep_levels(
+                max_rep_level,
+                match rep_levels {
+                    Some(a) => a,
+                    _ => unreachable!(),
+                },
+            );
         }
         if def_levels.is_some() {
-            pb.add_def_levels(max_def_level, def_levels.unwrap());
+            pb.add_def_levels(
+                max_def_level,
+                match def_levels {
+                    Some(a) => a,
+                    _ => unreachable!(),
+                },
+            );
         }
         pb.add_values::<T>(Encoding::PLAIN, &values);
         let page = pb.consume();

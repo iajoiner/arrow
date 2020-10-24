@@ -32,11 +32,13 @@
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/random.h"
 #include "arrow/util/decimal.h"
+#include "arrow/util/int128_internal.h"
 #include "arrow/util/macros.h"
 
-using boost::multiprecision::int128_t;
-
 namespace arrow {
+
+using internal::int128_t;
+using internal::uint128_t;
 
 class DecimalTestFixture : public ::testing::Test {
  public:
@@ -44,13 +46,6 @@ class DecimalTestFixture : public ::testing::Test {
   Decimal128 integer_value_;
   std::string string_value_;
 };
-
-TEST_F(DecimalTestFixture, TestToString) {
-  Decimal128 decimal(this->integer_value_);
-  int32_t scale = 5;
-  std::string result = decimal.ToString(scale);
-  ASSERT_EQ(result, this->string_value_);
-}
 
 TEST_F(DecimalTestFixture, TestFromString) {
   Decimal128 expected(this->integer_value_);
@@ -104,6 +99,35 @@ TEST(DecimalTest, TestFromDecimalString128) {
 
   // Sanity check that our number is actually using more than 64 bits
   ASSERT_NE(result.high_bits(), 0);
+}
+
+TEST(DecimalTest, TestStringRoundTrip) {
+  static constexpr uint64_t kTestBits[] = {
+      0,
+      1,
+      999,
+      1000,
+      std::numeric_limits<int32_t>::max(),
+      (1ull << 31),
+      std::numeric_limits<uint32_t>::max(),
+      (1ull << 32),
+      std::numeric_limits<int64_t>::max(),
+      (1ull << 63),
+      std::numeric_limits<uint64_t>::max(),
+  };
+  static constexpr int32_t kScales[] = {0, 1, 10};
+  for (uint64_t high_bits : kTestBits) {
+    for (uint64_t low_bits : kTestBits) {
+      // When high_bits = 1ull << 63 or std::numeric_limits<uint64_t>::max(), decimal is
+      // negative.
+      Decimal128 decimal(high_bits, low_bits);
+      for (int32_t scale : kScales) {
+        std::string str = decimal.ToString(scale);
+        ASSERT_OK_AND_ASSIGN(Decimal128 result, Decimal128::FromString(str));
+        EXPECT_EQ(decimal, result);
+      }
+    }
+  }
 }
 
 TEST(DecimalTest, TestDecimal32SignedRoundTrip) {
@@ -291,28 +315,93 @@ TEST(Decimal128Test, PrintMinValue) {
   ASSERT_EQ(string_value, printed_value);
 }
 
-class Decimal128PrintingTest
-    : public ::testing::TestWithParam<std::tuple<int32_t, int32_t, std::string>> {};
-
-TEST_P(Decimal128PrintingTest, Print) {
-  int32_t test_value;
+struct ToStringTestParam {
+  int64_t test_value;
   int32_t scale;
   std::string expected_string;
-  std::tie(test_value, scale, expected_string) = GetParam();
-  const Decimal128 value(test_value);
-  const std::string printed_value = value.ToString(scale);
-  ASSERT_EQ(expected_string, printed_value);
+
+  // Avoid Valgrind uninitialized memory reads with the default GTest print routine.
+  friend std::ostream& operator<<(std::ostream& os, const ToStringTestParam& param) {
+    return os << "<value: " << param.test_value << ">";
+  }
+};
+
+static const ToStringTestParam kToStringTestData[] = {
+    {0, -1, "0.E+1"},
+    {0, 0, "0"},
+    {0, 1, "0.0"},
+    {0, 6, "0.000000"},
+    {2, 7, "2.E-7"},
+    {2, -1, "2.E+1"},
+    {2, 0, "2"},
+    {2, 1, "0.2"},
+    {2, 6, "0.000002"},
+    {-2, 7, "-2.E-7"},
+    {-2, 7, "-2.E-7"},
+    {-2, -1, "-2.E+1"},
+    {-2, 0, "-2"},
+    {-2, 1, "-0.2"},
+    {-2, 6, "-0.000002"},
+    {-2, 7, "-2.E-7"},
+    {123, -3, "1.23E+5"},
+    {123, -1, "1.23E+3"},
+    {123, 1, "12.3"},
+    {123, 0, "123"},
+    {123, 5, "0.00123"},
+    {123, 8, "0.00000123"},
+    {123, 9, "1.23E-7"},
+    {123, 10, "1.23E-8"},
+    {-123, -3, "-1.23E+5"},
+    {-123, -1, "-1.23E+3"},
+    {-123, 1, "-12.3"},
+    {-123, 0, "-123"},
+    {-123, 5, "-0.00123"},
+    {-123, 8, "-0.00000123"},
+    {-123, 9, "-1.23E-7"},
+    {-123, 10, "-1.23E-8"},
+    {1000000000, -3, "1.000000000E+12"},
+    {1000000000, -1, "1.000000000E+10"},
+    {1000000000, 0, "1000000000"},
+    {1000000000, 1, "100000000.0"},
+    {1000000000, 5, "10000.00000"},
+    {1000000000, 15, "0.000001000000000"},
+    {1000000000, 16, "1.000000000E-7"},
+    {1000000000, 17, "1.000000000E-8"},
+    {-1000000000, -3, "-1.000000000E+12"},
+    {-1000000000, -1, "-1.000000000E+10"},
+    {-1000000000, 0, "-1000000000"},
+    {-1000000000, 1, "-100000000.0"},
+    {-1000000000, 5, "-10000.00000"},
+    {-1000000000, 15, "-0.000001000000000"},
+    {-1000000000, 16, "-1.000000000E-7"},
+    {-1000000000, 17, "-1.000000000E-8"},
+    {1234567890123456789LL, -3, "1.234567890123456789E+21"},
+    {1234567890123456789LL, -1, "1.234567890123456789E+19"},
+    {1234567890123456789LL, 0, "1234567890123456789"},
+    {1234567890123456789LL, 1, "123456789012345678.9"},
+    {1234567890123456789LL, 5, "12345678901234.56789"},
+    {1234567890123456789LL, 24, "0.000001234567890123456789"},
+    {1234567890123456789LL, 25, "1.234567890123456789E-7"},
+    {-1234567890123456789LL, -3, "-1.234567890123456789E+21"},
+    {-1234567890123456789LL, -1, "-1.234567890123456789E+19"},
+    {-1234567890123456789LL, 0, "-1234567890123456789"},
+    {-1234567890123456789LL, 1, "-123456789012345678.9"},
+    {-1234567890123456789LL, 5, "-12345678901234.56789"},
+    {-1234567890123456789LL, 24, "-0.000001234567890123456789"},
+    {-1234567890123456789LL, 25, "-1.234567890123456789E-7"},
+};
+
+class Decimal128ToStringTest : public ::testing::TestWithParam<ToStringTestParam> {};
+
+TEST_P(Decimal128ToStringTest, ToString) {
+  const ToStringTestParam& param = GetParam();
+  const Decimal128 value(param.test_value);
+  const std::string printed_value = value.ToString(param.scale);
+  ASSERT_EQ(param.expected_string, printed_value);
 }
 
-INSTANTIATE_TEST_SUITE_P(Decimal128PrintingTest, Decimal128PrintingTest,
-                         ::testing::Values(std::make_tuple(123, 1, "12.3"),
-                                           std::make_tuple(123, 5, "0.00123"),
-                                           std::make_tuple(123, 10, "1.23E-8"),
-                                           std::make_tuple(123, -1, "1.23E+3"),
-                                           std::make_tuple(-123, -1, "-1.23E+3"),
-                                           std::make_tuple(123, -3, "1.23E+5"),
-                                           std::make_tuple(-123, -3, "-1.23E+5"),
-                                           std::make_tuple(12345, -3, "1.2345E+7")));
+INSTANTIATE_TEST_SUITE_P(Decimal128ToStringTest, Decimal128ToStringTest,
+                         ::testing::ValuesIn(kToStringTestData));
 
 class Decimal128ParsingTest
     : public ::testing::TestWithParam<std::tuple<std::string, uint64_t, int32_t>> {};
@@ -382,8 +471,7 @@ struct FromRealTestParam {
   int32_t scale;
   std::string expected;
 
-  // Weird, but we need to define this to avoid Valgrind issues
-  // with the default GTest print routine.
+  // Avoid Valgrind uninitialized memory reads with the default GTest print routine.
   friend std::ostream& operator<<(std::ostream& os,
                                   const FromRealTestParam<Real>& param) {
     return os << "<real: " << param.real << ">";
@@ -706,15 +794,6 @@ TEST_F(TestDecimalToRealDouble, Precision) {
 
 #endif  // __MINGW32__
 
-TEST(Decimal128Test, TestSmallNumberFormat) {
-  Decimal128 value("0.2");
-  std::string expected("0.2");
-
-  const int32_t scale = 1;
-  std::string result = value.ToString(scale);
-  ASSERT_EQ(expected, result);
-}
-
 TEST(Decimal128Test, TestNoDecimalPointExponential) {
   Decimal128 value;
   int32_t precision;
@@ -825,6 +904,11 @@ std::vector<CType> GetRandomNumbers(int32_t size) {
   return ret;
 }
 
+Decimal128 Decimal128FromInt128(int128_t value) {
+  return Decimal128(static_cast<int64_t>(value >> 64),
+                    static_cast<uint64_t>(value & 0xFFFFFFFFFFFFFFFFULL));
+}
+
 TEST(Decimal128Test, Multiply) {
   ASSERT_EQ(Decimal128(60501), Decimal128(301) * Decimal128(201));
 
@@ -840,6 +924,14 @@ TEST(Decimal128Test, Multiply) {
       Decimal128 result = Decimal128(x) * Decimal128(y);
       ASSERT_EQ(Decimal128(static_cast<int64_t>(x) * y), result)
           << " x: " << x << " y: " << y;
+      // Test by multiplying with an additional 32 bit factor, then additional
+      // factor of 2^30 to test results in the range of -2^123 to 2^123 without overflow.
+      for (auto z : GetRandomNumbers<Int32Type>(32)) {
+        int128_t w = static_cast<int128_t>(x) * y * (1ull << 30);
+        Decimal128 expected = Decimal128FromInt128(static_cast<int128_t>(w) * z);
+        Decimal128 actual = Decimal128FromInt128(w) * Decimal128(z);
+        ASSERT_EQ(expected, actual) << " w: " << x << " * " << y << " * 2^30 z: " << z;
+      }
     }
   }
 
@@ -847,8 +939,11 @@ TEST(Decimal128Test, Multiply) {
   for (auto x : std::vector<int128_t>{-INT64_MAX, -INT32_MAX, 0, INT32_MAX, INT64_MAX}) {
     for (auto y :
          std::vector<int128_t>{-INT32_MAX, -32, -2, -1, 0, 1, 2, 32, INT32_MAX}) {
-      Decimal128 result = Decimal128(x.str()) * Decimal128(y.str());
-      ASSERT_EQ(Decimal128((x * y).str()), result) << " x: " << x << " y: " << y;
+      Decimal128 decimal_x = Decimal128FromInt128(x);
+      Decimal128 decimal_y = Decimal128FromInt128(y);
+      Decimal128 result = decimal_x * decimal_y;
+      EXPECT_EQ(Decimal128FromInt128(x * y), result)
+          << " x: " << decimal_x << " y: " << decimal_y;
     }
   }
 }
@@ -878,8 +973,11 @@ TEST(Decimal128Test, Divide) {
   // Test some edge cases
   for (auto x : std::vector<int128_t>{-INT64_MAX, -INT32_MAX, 0, INT32_MAX, INT64_MAX}) {
     for (auto y : std::vector<int128_t>{-INT32_MAX, -32, -2, -1, 1, 2, 32, INT32_MAX}) {
-      Decimal128 result = Decimal128(x.str()) * Decimal128(y.str());
-      ASSERT_EQ(Decimal128((x * y).str()), result) << " x: " << x << " y: " << y;
+      Decimal128 decimal_x = Decimal128FromInt128(x);
+      Decimal128 decimal_y = Decimal128FromInt128(y);
+      Decimal128 result = decimal_x / decimal_y;
+      EXPECT_EQ(Decimal128FromInt128(x / y), result)
+          << " x: " << decimal_x << " y: " << decimal_y;
     }
   }
 }
@@ -909,8 +1007,11 @@ TEST(Decimal128Test, Mod) {
   // Test some edge cases
   for (auto x : std::vector<int128_t>{-INT64_MAX, -INT32_MAX, 0, INT32_MAX, INT64_MAX}) {
     for (auto y : std::vector<int128_t>{-INT32_MAX, -32, -2, -1, 1, 2, 32, INT32_MAX}) {
-      Decimal128 result = Decimal128(x.str()) * Decimal128(y.str());
-      ASSERT_EQ(Decimal128((x * y).str()), result) << " x: " << x << " y: " << y;
+      Decimal128 decimal_x = Decimal128FromInt128(x);
+      Decimal128 decimal_y = Decimal128FromInt128(y);
+      Decimal128 result = decimal_x % decimal_y;
+      EXPECT_EQ(Decimal128FromInt128(x % y), result)
+          << " x: " << decimal_x << " y: " << decimal_y;
     }
   }
 }
@@ -1054,5 +1155,157 @@ TEST(Decimal128Test, FitsInPrecision) {
   ASSERT_FALSE(
       Decimal128("-100000000000000000000000000000000000000").FitsInPrecision(38));
 }
+
+static constexpr std::array<uint64_t, 4> kSortedDecimal256Bits[] = {
+    {0, 0, 0, 0x8000000000000000ULL},  // min
+    {0xFFFFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL,
+     0xFFFFFFFFFFFFFFFFULL},  // -2
+    {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL,
+     0xFFFFFFFFFFFFFFFFULL},  // -1
+    {0, 0, 0, 0},
+    {1, 0, 0, 0},
+    {2, 0, 0, 0},
+    {0xFFFFFFFFFFFFFFFFULL, 0, 0, 0},
+    {0, 1, 0, 0},
+    {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0, 0},
+    {0, 0, 1, 0},
+    {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0},
+    {0, 0, 0, 1},
+    {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL,
+     0x7FFFFFFFFFFFFFFFULL},  // max
+};
+
+TEST(Decimal256Test, TestComparators) {
+  constexpr size_t num_values =
+      sizeof(kSortedDecimal256Bits) / sizeof(kSortedDecimal256Bits[0]);
+  for (size_t i = 0; i < num_values; ++i) {
+    Decimal256 left(kSortedDecimal256Bits[i]);
+    for (size_t j = 0; j < num_values; ++j) {
+      Decimal256 right(kSortedDecimal256Bits[j]);
+      EXPECT_EQ(i == j, left == right);
+      EXPECT_EQ(i != j, left != right);
+      EXPECT_EQ(i < j, left < right);
+      EXPECT_EQ(i > j, left > right);
+      EXPECT_EQ(i <= j, left <= right);
+      EXPECT_EQ(i >= j, left >= right);
+    }
+  }
+}
+
+TEST(Decimal256Test, TestToBytesRoundTrip) {
+  for (const std::array<uint64_t, 4>& bits : kSortedDecimal256Bits) {
+    Decimal256 decimal(bits);
+    EXPECT_EQ(decimal, Decimal256(decimal.ToBytes().data()));
+  }
+}
+
+template <typename T>
+class Decimal256Test : public ::testing::Test {
+ public:
+  Decimal256Test() {}
+};
+
+using Decimal256Types =
+    ::testing::Types<char, unsigned char, short, unsigned short,  // NOLINT
+                     int, unsigned int, long, unsigned long,      // NOLINT
+                     long long, unsigned long long                // NOLINT
+                     >;
+
+TYPED_TEST_SUITE(Decimal256Test, Decimal256Types);
+
+TYPED_TEST(Decimal256Test, ConstructibleFromAnyIntegerType) {
+  using UInt64Array = std::array<uint64_t, 4>;
+  Decimal256 value(TypeParam{42});
+  EXPECT_EQ(UInt64Array({42, 0, 0, 0}), value.little_endian_array());
+
+  TypeParam max = std::numeric_limits<TypeParam>::max();
+  Decimal256 max_value(max);
+  EXPECT_EQ(UInt64Array({static_cast<uint64_t>(max), 0, 0, 0}),
+            max_value.little_endian_array());
+
+  TypeParam min = std::numeric_limits<TypeParam>::min();
+  Decimal256 min_value(min);
+  uint64_t high_bits = std::is_signed<TypeParam>::value ? ~uint64_t{0} : uint64_t{0};
+  EXPECT_EQ(UInt64Array({static_cast<uint64_t>(min), high_bits, high_bits, high_bits}),
+            min_value.little_endian_array());
+}
+
+TEST(Decimal256Test, ConstructibleFromBool) {
+  EXPECT_EQ(Decimal256(0), Decimal256(false));
+  EXPECT_EQ(Decimal256(1), Decimal256(true));
+}
+
+Decimal256 Decimal256FromInt128(int128_t value) {
+  return Decimal256(Decimal128(static_cast<int64_t>(value >> 64),
+                               static_cast<uint64_t>(value & 0xFFFFFFFFFFFFFFFFULL)));
+}
+
+TEST(Decimal256Test, Multiply) {
+  using boost::multiprecision::int256_t;
+  using boost::multiprecision::uint256_t;
+
+  ASSERT_EQ(Decimal256(60501), Decimal256(301) * Decimal256(201));
+
+  ASSERT_EQ(Decimal256(-60501), Decimal256(-301) * Decimal256(201));
+
+  ASSERT_EQ(Decimal256(-60501), Decimal256(301) * Decimal256(-201));
+
+  ASSERT_EQ(Decimal256(60501), Decimal256(-301) * Decimal256(-201));
+
+  // Test some random numbers.
+  std::vector<int128_t> left;
+  std::vector<int128_t> right;
+  for (auto x : GetRandomNumbers<Int32Type>(16)) {
+    for (auto y : GetRandomNumbers<Int32Type>(16)) {
+      for (auto z : GetRandomNumbers<Int32Type>(16)) {
+        for (auto w : GetRandomNumbers<Int32Type>(16)) {
+          // Test two 128 bit numbers which have a large amount of bits set.
+          int128_t l = static_cast<uint128_t>(x) << 96 | static_cast<uint128_t>(y) << 64 |
+                       static_cast<uint128_t>(z) << 32 | static_cast<uint128_t>(w);
+          int128_t r = static_cast<uint128_t>(w) << 96 | static_cast<uint128_t>(z) << 64 |
+                       static_cast<uint128_t>(y) << 32 | static_cast<uint128_t>(x);
+          int256_t expected = int256_t(l) * r;
+          Decimal256 actual = Decimal256FromInt128(l) * Decimal256FromInt128(r);
+          ASSERT_EQ(expected.str(), actual.ToIntegerString())
+              << " " << int256_t(l).str() << " * " << int256_t(r).str();
+          // Test a 96 bit number against a 160 bit number.
+          int128_t s = l >> 32;
+          uint256_t b = uint256_t(r) << 32;
+          Decimal256 b_dec =
+              Decimal256FromInt128(r) * Decimal256(static_cast<uint64_t>(1) << 32);
+          ASSERT_EQ(b.str(), b_dec.ToIntegerString()) << int256_t(r).str();
+          expected = int256_t(s) * b;
+          actual = Decimal256FromInt128(s) * b_dec;
+          ASSERT_EQ(expected.str(), actual.ToIntegerString())
+              << " " << int256_t(s).str() << " * " << int256_t(b).str();
+        }
+      }
+    }
+  }
+
+  // Test some edge cases
+  for (auto x : std::vector<int128_t>{-INT64_MAX, -INT32_MAX, 0, INT32_MAX, INT64_MAX}) {
+    for (auto y :
+         std::vector<int128_t>{-INT32_MAX, -32, -2, -1, 0, 1, 2, 32, INT32_MAX}) {
+      Decimal256 decimal_x = Decimal256FromInt128(x);
+      Decimal256 decimal_y = Decimal256FromInt128(y);
+      Decimal256 result = decimal_x * decimal_y;
+      EXPECT_EQ(Decimal256FromInt128(x * y), result)
+          << " x: " << decimal_x << " y: " << decimal_y;
+    }
+  }
+}
+
+class Decimal256ToStringTest : public ::testing::TestWithParam<ToStringTestParam> {};
+
+TEST_P(Decimal256ToStringTest, ToString) {
+  const ToStringTestParam& data = GetParam();
+  const Decimal256 value(data.test_value);
+  const std::string printed_value = value.ToString(data.scale);
+  ASSERT_EQ(data.expected_string, printed_value);
+}
+
+INSTANTIATE_TEST_SUITE_P(Decimal256ToStringTest, Decimal256ToStringTest,
+                         ::testing::ValuesIn(kToStringTestData));
 
 }  // namespace arrow

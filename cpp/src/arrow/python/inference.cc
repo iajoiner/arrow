@@ -450,9 +450,16 @@ class TypeInferrer {
     } else if (struct_count_) {
       RETURN_NOT_OK(GetStructType(out));
     } else if (decimal_count_) {
-      // the default constructor does not validate the precision and scale
-      ARROW_ASSIGN_OR_RAISE(*out, Decimal128Type::Make(max_decimal_metadata_.precision(),
-                                                       max_decimal_metadata_.scale()));
+      if (max_decimal_metadata_.precision() > Decimal128Type::kMaxPrecision) {
+        // the default constructor does not validate the precision and scale
+        ARROW_ASSIGN_OR_RAISE(*out,
+                              Decimal256Type::Make(max_decimal_metadata_.precision(),
+                                                   max_decimal_metadata_.scale()));
+      } else {
+        ARROW_ASSIGN_OR_RAISE(*out,
+                              Decimal128Type::Make(max_decimal_metadata_.precision(),
+                                                   max_decimal_metadata_.scale()));
+      }
     } else if (float_count_) {
       // Prioritize floats before integers
       *out = float64();
@@ -620,39 +627,23 @@ class TypeInferrer {
 };
 
 // Non-exhaustive type inference
-Status InferArrowType(PyObject* obj, PyObject* mask, bool pandas_null_sentinels,
-                      std::shared_ptr<DataType>* out_type) {
+Result<std::shared_ptr<DataType>> InferArrowType(PyObject* obj, PyObject* mask,
+                                                 bool pandas_null_sentinels) {
   if (pandas_null_sentinels) {
     // ARROW-842: If pandas is not installed then null checks will be less
     // comprehensive, but that is okay.
     internal::InitPandasStaticData();
   }
 
+  std::shared_ptr<DataType> out_type;
   TypeInferrer inferrer(pandas_null_sentinels);
   RETURN_NOT_OK(inferrer.VisitSequence(obj, mask));
-  RETURN_NOT_OK(inferrer.GetType(out_type));
-  if (*out_type == nullptr) {
+  RETURN_NOT_OK(inferrer.GetType(&out_type));
+  if (out_type == nullptr) {
     return Status::TypeError("Unable to determine data type");
+  } else {
+    return std::move(out_type);
   }
-
-  return Status::OK();
-}
-
-Status InferArrowTypeAndSize(PyObject* obj, PyObject* mask, bool pandas_null_sentinels,
-                             int64_t* size, std::shared_ptr<DataType>* out_type) {
-  if (!PySequence_Check(obj)) {
-    return Status::TypeError("Object is not a sequence");
-  }
-  *size = static_cast<int64_t>(PySequence_Size(obj));
-
-  // For 0-length sequences, refuse to guess
-  if (*size == 0) {
-    *out_type = null();
-    return Status::OK();
-  }
-  RETURN_NOT_OK(InferArrowType(obj, mask, pandas_null_sentinels, out_type));
-
-  return Status::OK();
 }
 
 ARROW_PYTHON_EXPORT

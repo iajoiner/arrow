@@ -128,6 +128,8 @@ class ARROW_DS_EXPORT FileFormat : public std::enable_shared_from_this<FileForma
   /// \brief Return true if fragments of this format can benefit from parallel scanning.
   virtual bool splittable() const { return false; }
 
+  virtual bool Equals(const FileFormat& other) const = 0;
+
   /// \brief Indicate if the FileSource is supported/readable by this format.
   virtual Result<bool> IsSupported(const FileSource& source) const = 0;
 
@@ -151,9 +153,11 @@ class ARROW_DS_EXPORT FileFormat : public std::enable_shared_from_this<FileForma
   Result<std::shared_ptr<FileFragment>> MakeFragment(
       FileSource source, std::shared_ptr<Schema> physical_schema = NULLPTR);
 
-  /// \brief Write a fragment.
-  /// FIXME(bkietz) make this pure virtual
-  virtual Status WriteFragment(RecordBatchReader* batches, io::OutputStream* destination);
+  virtual Result<std::shared_ptr<FileWriter>> MakeWriter(
+      std::shared_ptr<io::OutputStream> destination, std::shared_ptr<Schema> schema,
+      std::shared_ptr<FileWriteOptions> options) const = 0;
+
+  virtual std::shared_ptr<FileWriteOptions> DefaultWriteOptions() = 0;
 };
 
 /// \brief A Fragment that is stored in a file with a known format
@@ -195,31 +199,22 @@ class ARROW_DS_EXPORT FileSystemDataset : public Dataset {
   /// \param[in] schema the schema of the dataset
   /// \param[in] root_partition the partition expression of the dataset
   /// \param[in] format the format of each FileFragment.
-  /// \param[in] fragments list of fragments to create the dataset from
+  /// \param[in] filesystem the filesystem of each FileFragment, or nullptr if the
+  ///            fragments wrap buffers.
+  /// \param[in] fragments list of fragments to create the dataset from.
   ///
-  /// Note that all fragment must be of `FileFragment` type. The type are
-  /// erased to simplify callers.
+  /// Note that fragments wrapping files resident in differing filesystems are not
+  /// permitted; to work with multiple filesystems use a UnionDataset.
   ///
   /// \return A constructed dataset.
   static Result<std::shared_ptr<FileSystemDataset>> Make(
       std::shared_ptr<Schema> schema, std::shared_ptr<Expression> root_partition,
-      std::shared_ptr<FileFormat> format,
+      std::shared_ptr<FileFormat> format, std::shared_ptr<fs::FileSystem> filesystem,
       std::vector<std::shared_ptr<FileFragment>> fragments);
 
   /// \brief Write a dataset.
-  ///
-  /// \param[in] schema Schema of written dataset.
-  /// \param[in] format FileFormat with which fragments will be written.
-  /// \param[in] filesystem FileSystem into which the dataset will be written.
-  /// \param[in] base_dir Root directory into which the dataset will be written.
-  /// \param[in] partitioning Partitioning used to generate fragment paths.
-  /// \param[in] scan_context Resource pool used to scan and write fragments.
-  /// \param[in] fragments Fragments to be written to disk.
-  static Status Write(std::shared_ptr<Schema> schema, std::shared_ptr<FileFormat> format,
-                      std::shared_ptr<fs::FileSystem> filesystem, std::string base_dir,
-                      std::shared_ptr<Partitioning> partitioning,
-                      std::shared_ptr<ScanContext> scan_context,
-                      FragmentIterator fragments);
+  static Status Write(const FileSystemDatasetWriteOptions& write_options,
+                      std::shared_ptr<Scanner> scanner);
 
   /// \brief Return the type name of the dataset.
   std::string type_name() const override { return "filesystem"; }
@@ -234,6 +229,9 @@ class ARROW_DS_EXPORT FileSystemDataset : public Dataset {
   /// \brief Return the format.
   const std::shared_ptr<FileFormat>& format() const { return format_; }
 
+  /// \brief Return the filesystem. May be nullptr if the fragments wrap buffers.
+  const std::shared_ptr<fs::FileSystem>& filesystem() const { return filesystem_; }
+
   std::string ToString() const;
 
  protected:
@@ -242,10 +240,71 @@ class ARROW_DS_EXPORT FileSystemDataset : public Dataset {
   FileSystemDataset(std::shared_ptr<Schema> schema,
                     std::shared_ptr<Expression> root_partition,
                     std::shared_ptr<FileFormat> format,
+                    std::shared_ptr<fs::FileSystem> filesystem,
                     std::vector<std::shared_ptr<FileFragment>> fragments);
 
   std::shared_ptr<FileFormat> format_;
+  std::shared_ptr<fs::FileSystem> filesystem_;
   std::vector<std::shared_ptr<FileFragment>> fragments_;
+};
+
+class ARROW_DS_EXPORT FileWriteOptions {
+ public:
+  virtual ~FileWriteOptions() = default;
+
+  const std::shared_ptr<FileFormat>& format() const { return format_; }
+
+  std::string type_name() const { return format_->type_name(); }
+
+ protected:
+  explicit FileWriteOptions(std::shared_ptr<FileFormat> format)
+      : format_(std::move(format)) {}
+
+  std::shared_ptr<FileFormat> format_;
+};
+
+class ARROW_DS_EXPORT FileWriter {
+ public:
+  virtual ~FileWriter() = default;
+
+  virtual Status Write(const std::shared_ptr<RecordBatch>& batch) = 0;
+
+  Status Write(RecordBatchReader* batches);
+
+  virtual Status Finish() = 0;
+
+  const std::shared_ptr<FileFormat>& format() const { return options_->format(); }
+  const std::shared_ptr<Schema>& schema() const { return schema_; }
+  const std::shared_ptr<FileWriteOptions>& options() const { return options_; }
+
+ protected:
+  FileWriter(std::shared_ptr<Schema> schema, std::shared_ptr<FileWriteOptions> options)
+      : schema_(std::move(schema)), options_(std::move(options)) {}
+
+  std::shared_ptr<Schema> schema_;
+  std::shared_ptr<FileWriteOptions> options_;
+};
+
+struct ARROW_DS_EXPORT FileSystemDatasetWriteOptions {
+  /// Options for individual fragment writing.
+  std::shared_ptr<FileWriteOptions> file_write_options;
+
+  /// FileSystem into which a dataset will be written.
+  std::shared_ptr<fs::FileSystem> filesystem;
+
+  /// Root directory into which the dataset will be written.
+  std::string base_dir;
+
+  /// Partitioning used to generate fragment paths.
+  std::shared_ptr<Partitioning> partitioning;
+
+  /// Template string used to generate fragment basenames.
+  /// {i} will be replaced by an auto incremented integer.
+  std::string basename_template;
+
+  const std::shared_ptr<FileFormat>& format() const {
+    return file_write_options->format();
+  }
 };
 
 }  // namespace dataset

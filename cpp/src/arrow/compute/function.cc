@@ -29,6 +29,10 @@
 namespace arrow {
 namespace compute {
 
+static const FunctionDoc kEmptyFunctionDoc{};
+
+const FunctionDoc& FunctionDoc::Empty() { return kEmptyFunctionDoc; }
+
 Status Function::CheckArity(int passed_num_args) const {
   if (arity_.is_varargs && passed_num_args < arity_.num_args) {
     return Status::Invalid("VarArgs function needs at least ", arity_.num_args,
@@ -103,6 +107,9 @@ Result<const KernelType*> DispatchExactImpl(const Function& func,
 
 Result<Datum> Function::Execute(const std::vector<Datum>& args,
                                 const FunctionOptions* options, ExecContext* ctx) const {
+  if (options == nullptr) {
+    options = default_options();
+  }
   if (ctx == nullptr) {
     ExecContext default_ctx;
     return Execute(args, options, &default_ctx);
@@ -115,6 +122,17 @@ Result<Datum> Function::Execute(const std::vector<Datum>& args,
   auto listener = std::make_shared<detail::DatumAccumulator>();
   RETURN_NOT_OK(executor->Execute(args, listener.get()));
   return executor->WrapResults(args, listener->values());
+}
+
+Status Function::Validate() const {
+  if (!doc_->summary.empty()) {
+    // Documentation given, check its contents
+    if (static_cast<int>(doc_->arg_names.size()) != arity_.num_args) {
+      return Status::Invalid("In function '", name_,
+                             "': ", "number of argument names != function arity");
+    }
+  }
+  return Status::OK();
 }
 
 Status ScalarFunction::AddKernel(std::vector<InputType> in_types, OutputType out_type,
@@ -189,6 +207,9 @@ Result<Datum> MetaFunction::Execute(const std::vector<Datum>& args,
                                     const FunctionOptions* options,
                                     ExecContext* ctx) const {
   RETURN_NOT_OK(CheckArity(static_cast<int>(args.size())));
+  if (options == nullptr) {
+    options = default_options();
+  }
   return ExecuteImpl(args, options, ctx);
 }
 

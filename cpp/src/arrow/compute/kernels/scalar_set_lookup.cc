@@ -399,12 +399,15 @@ void AddBasicSetLookupKernels(ScalarKernel kernel,
 // Enables calling is_in with CallFunction as though it were binary.
 class IsInMetaBinary : public MetaFunction {
  public:
-  IsInMetaBinary() : MetaFunction("is_in_meta_binary", Arity::Binary()) {}
+  IsInMetaBinary()
+      : MetaFunction("is_in_meta_binary", Arity::Binary(), /*doc=*/nullptr) {}
 
   Result<Datum> ExecuteImpl(const std::vector<Datum>& args,
                             const FunctionOptions* options,
                             ExecContext* ctx) const override {
-    DCHECK_EQ(options, nullptr);
+    if (options != nullptr) {
+      return Status::Invalid("Unexpected options for 'is_in_meta_binary' function");
+    }
     return IsIn(args[0], args[1], ctx);
   }
 };
@@ -412,15 +415,34 @@ class IsInMetaBinary : public MetaFunction {
 // Enables calling index_in with CallFunction as though it were binary.
 class IndexInMetaBinary : public MetaFunction {
  public:
-  IndexInMetaBinary() : MetaFunction("index_in_meta_binary", Arity::Binary()) {}
+  IndexInMetaBinary()
+      : MetaFunction("index_in_meta_binary", Arity::Binary(), /*doc=*/nullptr) {}
 
   Result<Datum> ExecuteImpl(const std::vector<Datum>& args,
                             const FunctionOptions* options,
                             ExecContext* ctx) const override {
-    DCHECK_EQ(options, nullptr);
+    if (options != nullptr) {
+      return Status::Invalid("Unexpected options for 'index_in_meta_binary' function");
+    }
     return IndexIn(args[0], args[1], ctx);
   }
 };
+
+const FunctionDoc is_in_doc{
+    "Find each element in a set of values",
+    ("For each element in `values`, return true if it is found in a given\n"
+     "set of values.  The set of values to look for must be given in\n"
+     "SetLookupOptions."),
+    {"values"},
+    "SetLookupOptions"};
+
+const FunctionDoc index_in_doc{
+    "Return index of each element in a set of values",
+    ("For each element in `values`, return its index in a given set of\n"
+     "values, or null if it is not found there.\n"
+     "The set of values to look for must be given in SetLookupOptions."),
+    {"values"},
+    "SetLookupOptions"};
 
 }  // namespace
 
@@ -430,7 +452,7 @@ void RegisterScalarSetLookup(FunctionRegistry* registry) {
     ScalarKernel isin_base;
     isin_base.init = InitSetLookup;
     isin_base.exec = ExecIsIn;
-    auto is_in = std::make_shared<ScalarFunction>("is_in", Arity::Unary());
+    auto is_in = std::make_shared<ScalarFunction>("is_in", Arity::Unary(), &is_in_doc);
 
     AddBasicSetLookupKernels(isin_base, /*output_type=*/boolean(), is_in.get());
 
@@ -444,17 +466,19 @@ void RegisterScalarSetLookup(FunctionRegistry* registry) {
 
   // IndexIn uses Int32Builder and so is responsible for all its own allocation
   {
-    ScalarKernel match_base;
-    match_base.init = InitSetLookup;
-    match_base.exec = ExecIndexIn;
-    match_base.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
-    match_base.mem_allocation = MemAllocation::NO_PREALLOCATE;
-    auto match = std::make_shared<ScalarFunction>("index_in", Arity::Unary());
-    AddBasicSetLookupKernels(match_base, /*output_type=*/int32(), match.get());
+    ScalarKernel index_in_base;
+    index_in_base.init = InitSetLookup;
+    index_in_base.exec = ExecIndexIn;
+    index_in_base.null_handling = NullHandling::COMPUTED_NO_PREALLOCATE;
+    index_in_base.mem_allocation = MemAllocation::NO_PREALLOCATE;
+    auto index_in =
+        std::make_shared<ScalarFunction>("index_in", Arity::Unary(), &index_in_doc);
 
-    match_base.signature = KernelSignature::Make({null()}, int32());
-    DCHECK_OK(match->AddKernel(match_base));
-    DCHECK_OK(registry->AddFunction(match));
+    AddBasicSetLookupKernels(index_in_base, /*output_type=*/int32(), index_in.get());
+
+    index_in_base.signature = KernelSignature::Make({null()}, int32());
+    DCHECK_OK(index_in->AddKernel(index_in_base));
+    DCHECK_OK(registry->AddFunction(index_in));
 
     DCHECK_OK(registry->AddFunction(std::make_shared<IndexInMetaBinary>()));
   }

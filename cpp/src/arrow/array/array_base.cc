@@ -73,6 +73,10 @@ struct ScalarFromArraySlotImpl {
     return Finish(Decimal128(a.GetValue(index_)));
   }
 
+  Status Visit(const Decimal256Array& a) {
+    return Finish(Decimal256(a.GetValue(index_)));
+  }
+
   template <typename T>
   Status Visit(const BaseBinaryArray<T>& a) {
     return Finish(a.GetString(index_));
@@ -161,7 +165,13 @@ struct ScalarFromArraySlotImpl {
     }
 
     if (array_.IsNull(index_)) {
-      return MakeNullScalar(array_.type());
+      auto null = MakeNullScalar(array_.type());
+      if (is_dictionary(array_.type()->id())) {
+        auto& dict_null = checked_cast<DictionaryScalar&>(*null);
+        const auto& dict_array = checked_cast<const DictionaryArray&>(array_);
+        dict_null.value.dictionary = dict_array.dictionary();
+      }
+      return null;
     }
 
     RETURN_NOT_OK(VisitArrayInline(array_, this));

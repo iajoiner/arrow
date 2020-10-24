@@ -180,6 +180,7 @@ set(ARROW_SRCS
     util/bitmap.cc
     util/bitmap_builders.cc
     util/bitmap_ops.cc
+    util/bpacking.cc
     util/compression.cc
     util/cpu_info.cc
     util/decimal.cc
@@ -212,6 +213,20 @@ set(ARROW_SRCS
     vendored/double-conversion/fixed-dtoa.cc
     vendored/double-conversion/diy-fp.cc
     vendored/double-conversion/strtod.cc)
+
+if(ARROW_HAVE_RUNTIME_AVX2)
+  list(APPEND ARROW_SRCS util/bpacking_avx2.cc)
+  set_source_files_properties(util/bpacking_avx2.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+  set_source_files_properties(util/bpacking_avx2.cc PROPERTIES COMPILE_FLAGS
+                              ${ARROW_AVX2_FLAG})
+endif()
+if(ARROW_HAVE_RUNTIME_AVX512)
+  list(APPEND ARROW_SRCS util/bpacking_avx512.cc)
+  set_source_files_properties(util/bpacking_avx512.cc PROPERTIES SKIP_PRECOMPILE_HEADERS
+                              ON)
+  set_source_files_properties(util/bpacking_avx512.cc PROPERTIES COMPILE_FLAGS
+                              ${ARROW_AVX512_FLAG})
+endif()
 
 if(APPLE)
   list(APPEND ARROW_SRCS vendored/datetime/ios.mm)
@@ -350,6 +365,7 @@ if(ARROW_COMPUTE)
               compute/registry.cc
               compute/kernels/aggregate_basic.cc
               compute/kernels/aggregate_mode.cc
+              compute/kernels/aggregate_var_std.cc
               compute/kernels/codegen_internal.cc
               compute/kernels/scalar_arithmetic.cc
               compute/kernels/scalar_boolean.cc
@@ -371,18 +387,18 @@ if(ARROW_COMPUTE)
               compute/kernels/vector_selection.cc
               compute/kernels/vector_sort.cc)
 
-  if(CXX_SUPPORTS_AVX2)
-    list(APPEND ARROW_SRCS compute/kernels/aggregate_sum_avx2.cc)
-    set_source_files_properties(compute/kernels/aggregate_sum_avx2.cc PROPERTIES
+  if(ARROW_HAVE_RUNTIME_AVX2)
+    list(APPEND ARROW_SRCS compute/kernels/aggregate_basic_avx2.cc)
+    set_source_files_properties(compute/kernels/aggregate_basic_avx2.cc PROPERTIES
                                 SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(compute/kernels/aggregate_sum_avx2.cc PROPERTIES
+    set_source_files_properties(compute/kernels/aggregate_basic_avx2.cc PROPERTIES
                                 COMPILE_FLAGS ${ARROW_AVX2_FLAG})
   endif()
-  if(CXX_SUPPORTS_AVX512)
-    list(APPEND ARROW_SRCS compute/kernels/aggregate_sum_avx512.cc)
-    set_source_files_properties(compute/kernels/aggregate_sum_avx512.cc PROPERTIES
+  if(ARROW_HAVE_RUNTIME_AVX512)
+    list(APPEND ARROW_SRCS compute/kernels/aggregate_basic_avx512.cc)
+    set_source_files_properties(compute/kernels/aggregate_basic_avx512.cc PROPERTIES
                                 SKIP_PRECOMPILE_HEADERS ON)
-    set_source_files_properties(compute/kernels/aggregate_sum_avx512.cc PROPERTIES
+    set_source_files_properties(compute/kernels/aggregate_basic_avx512.cc PROPERTIES
                                 COMPILE_FLAGS ${ARROW_AVX512_FLAG})
   endif()
 endif()
@@ -390,9 +406,6 @@ endif()
 if(ARROW_FILESYSTEM)
   if(ARROW_HDFS)
     add_definitions(-DARROW_HDFS)
-  endif()
-  if(ARROW_S3)
-    add_definitions(-DARROW_S3)
   endif()
 
   list(APPEND ARROW_SRCS
@@ -448,7 +461,7 @@ if(ARROW_ORC)
   list(APPEND ARROW_SRCS adapters/orc/adapter.cc adapters/orc/adapter_util.cc)
 endif()
 
-if(NOT APPLE AND NOT MSVC)
+if(NOT APPLE AND NOT MSVC_TOOLCHAIN)
   # Localize thirdparty symbols using a linker version script. This hides them
   # from the client application. The OS X linker does not support the
   # version-script option.
@@ -514,11 +527,7 @@ if(ARROW_BUILD_STATIC AND ARROW_BUNDLED_STATIC_LIBS)
                            ${_OTHER_LIBS})
 endif()
 
-if(ARROW_BUILD_TESTS
-   OR ARROW_BUILD_BENCHMARKS
-   OR ARROW_BUILD_INTEGRATION
-   OR ARROW_FUZZING)
-
+if(ARROW_TESTING)
   # that depend on gtest
   add_arrow_lib(arrow_testing
                 CMAKE_PACKAGE_NAME

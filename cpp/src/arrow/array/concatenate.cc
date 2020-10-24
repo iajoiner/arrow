@@ -70,7 +70,9 @@ static Status ConcatenateBitmaps(const std::vector<Bitmap>& bitmaps, MemoryPool*
                                  std::shared_ptr<Buffer>* out) {
   int64_t out_length = 0;
   for (const auto& bitmap : bitmaps) {
-    out_length += bitmap.range.length;
+    if (internal::AddWithOverflow(out_length, bitmap.range.length, &out_length)) {
+      return Status::Invalid("Length overflow when concatenating arrays");
+    }
   }
   ARROW_ASSIGN_OR_RAISE(*out, AllocateBitmap(out_length, pool));
   uint8_t* dst = (*out)->mutable_data();
@@ -86,10 +88,6 @@ static Status ConcatenateBitmaps(const std::vector<Bitmap>& bitmaps, MemoryPool*
     bitmap_offset += bitmap.range.length;
   }
 
-  // finally (if applicable) zero out any trailing bits
-  if (auto preceding_bits = BitUtil::kPrecedingBitmask[out_length % 8]) {
-    dst[out_length / 8] &= preceding_bits;
-  }
   return Status::OK();
 }
 
@@ -203,7 +201,7 @@ class ConcatenateImpl {
   }
 
   Status Visit(const FixedWidthType& fixed) {
-    // Handles numbers, decimal128, fixed_size_binary
+    // Handles numbers, decimal128, decimal256, fixed_size_binary
     ARROW_ASSIGN_OR_RAISE(auto buffers, Buffers(1, fixed));
     return ConcatenateBuffers(buffers, pool_).Value(&out_->buffers[1]);
   }

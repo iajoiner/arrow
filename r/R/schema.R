@@ -84,10 +84,7 @@ Schema <- R6Class("Schema",
   ),
   active = list(
     names = function() {
-      out <- Schema__field_names(self)
-      # Hack: Rcpp should set the encoding
-      Encoding(out) <- "UTF-8"
-      out
+      Schema__field_names(self)
     },
     num_fields = function() Schema__num_fields(self),
     fields = function() map(Schema__fields(self), shared_ptr, class = Field),
@@ -184,6 +181,9 @@ length.Schema <- function(x) x$num_fields
     x$GetFieldByName(name)
   }
 }
+
+#' @export
+as.list.Schema <- function(x, ...) x$fields
 
 #' read a Schema from a stream
 #'

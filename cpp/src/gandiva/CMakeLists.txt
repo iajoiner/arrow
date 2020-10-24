@@ -106,7 +106,7 @@ endif()
 #     set(GANDIVA_SHARED_LINK_FLAGS "${GANDIVA_SHARED_LINK_FLAGS} /EXPORT:${SYMBOL}")
 #   endforeach()
 # endif()
-if(NOT APPLE AND NOT MSVC)
+if(NOT APPLE AND NOT MSVC_TOOLCHAIN)
   # Localize thirdparty symbols using a linker version script. This hides them
   # from the client application. The OS X linker does not support the
   # version-script option.
@@ -224,6 +224,7 @@ add_gandiva_test(internals-test
                  like_holder_test.cc
                  decimal_type_util_test.cc
                  random_generator_holder_test.cc
+                 gdv_function_stubs_test.cc
                  EXTRA_DEPENDENCIES
                  LLVM::LLVM_INTERFACE
                  EXTRA_INCLUDES
