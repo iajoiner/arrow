@@ -19,8 +19,8 @@ use super::*;
 use crate::datatypes::*;
 use crate::util::bit_util;
 use array::{
-    Array, GenericBinaryArray, GenericListArray, GenericStringArray, ListArrayOps,
-    OffsetSizeTrait, StringOffsetSizeTrait,
+    Array, BinaryOffsetSizeTrait, GenericBinaryArray, GenericListArray,
+    GenericStringArray, ListArrayOps, OffsetSizeTrait, StringOffsetSizeTrait,
 };
 use hex::FromHex;
 use serde_json::value::Value::{Null as JNull, Object, String as JString};
@@ -144,7 +144,7 @@ impl<OffsetSize: StringOffsetSizeTrait> PartialEq for GenericStringArray<OffsetS
     }
 }
 
-impl<OffsetSize: OffsetSizeTrait> PartialEq for GenericBinaryArray<OffsetSize> {
+impl<OffsetSize: BinaryOffsetSizeTrait> PartialEq for GenericBinaryArray<OffsetSize> {
     fn eq(&self, other: &Self) -> bool {
         self.equals(other)
     }
@@ -329,7 +329,7 @@ impl ArrayEqual for FixedSizeListArray {
     }
 }
 
-impl<OffsetSize: OffsetSizeTrait> ArrayEqual for GenericBinaryArray<OffsetSize> {
+impl<OffsetSize: BinaryOffsetSizeTrait> ArrayEqual for GenericBinaryArray<OffsetSize> {
     fn equals(&self, other: &dyn Array) -> bool {
         if !base_equal(&self.data(), &other.data()) {
             return false;
@@ -1022,7 +1022,7 @@ impl PartialEq<StructArray> for Value {
     }
 }
 
-impl<OffsetSize: OffsetSizeTrait> JsonEqual for GenericBinaryArray<OffsetSize> {
+impl<OffsetSize: BinaryOffsetSizeTrait> JsonEqual for GenericBinaryArray<OffsetSize> {
     fn equals_json(&self, json: &[&Value]) -> bool {
         if self.len() != json.len() {
             return false;
@@ -1042,7 +1042,9 @@ impl<OffsetSize: OffsetSizeTrait> JsonEqual for GenericBinaryArray<OffsetSize> {
     }
 }
 
-impl<OffsetSize: OffsetSizeTrait> PartialEq<Value> for GenericBinaryArray<OffsetSize> {
+impl<OffsetSize: BinaryOffsetSizeTrait> PartialEq<Value>
+    for GenericBinaryArray<OffsetSize>
+{
     fn eq(&self, json: &Value) -> bool {
         match json {
             Value::Array(json_array) => self.equals_json_values(&json_array),
@@ -1051,7 +1053,9 @@ impl<OffsetSize: OffsetSizeTrait> PartialEq<Value> for GenericBinaryArray<Offset
     }
 }
 
-impl<OffsetSize: OffsetSizeTrait> PartialEq<GenericBinaryArray<OffsetSize>> for Value {
+impl<OffsetSize: BinaryOffsetSizeTrait> PartialEq<GenericBinaryArray<OffsetSize>>
+    for Value
+{
     fn eq(&self, arrow: &GenericBinaryArray<OffsetSize>) -> bool {
         match self {
             Value::Array(json_array) => arrow.equals_json_values(&json_array),
@@ -1413,50 +1417,57 @@ mod tests {
         // assert!(b_slice.equals(&*a_slice));
     }
 
-    fn test_generic_string_equal<OffsetSize: StringOffsetSizeTrait>(datatype: DataType) {
-        let a = GenericStringArray::<OffsetSize>::from_vec(
-            vec!["hello", "world"],
-            datatype.clone(),
-        );
-        let b = GenericStringArray::<OffsetSize>::from_vec(
-            vec!["hello", "world"],
-            datatype.clone(),
-        );
+    fn test_generic_string_equal<OffsetSize: StringOffsetSizeTrait>() {
+        let a = GenericStringArray::<OffsetSize>::from_vec(vec!["hello", "world"]);
+        let b = GenericStringArray::<OffsetSize>::from_vec(vec!["hello", "world"]);
         assert!(a.equals(&b));
         assert!(b.equals(&a));
 
-        let b = GenericStringArray::<OffsetSize>::from_vec(
-            vec!["hello", "arrow"],
-            datatype.clone(),
-        );
+        let b = GenericStringArray::<OffsetSize>::from_vec(vec!["hello", "arrow"]);
         assert!(!a.equals(&b));
         assert!(!b.equals(&a));
 
         // Test the case where null_count > 0
 
-        let a = GenericStringArray::<OffsetSize>::from_opt_vec(
-            vec![Some("hello"), None, None, Some("world"), None, None],
-            datatype.clone(),
-        );
+        let a = GenericStringArray::<OffsetSize>::from_opt_vec(vec![
+            Some("hello"),
+            None,
+            None,
+            Some("world"),
+            None,
+            None,
+        ]);
 
-        let b = GenericStringArray::<OffsetSize>::from_opt_vec(
-            vec![Some("hello"), None, None, Some("world"), None, None],
-            datatype.clone(),
-        );
+        let b = GenericStringArray::<OffsetSize>::from_opt_vec(vec![
+            Some("hello"),
+            None,
+            None,
+            Some("world"),
+            None,
+            None,
+        ]);
         assert!(a.equals(&b));
         assert!(b.equals(&a));
 
-        let b = GenericStringArray::<OffsetSize>::from_opt_vec(
-            vec![Some("hello"), Some("foo"), None, Some("world"), None, None],
-            datatype.clone(),
-        );
+        let b = GenericStringArray::<OffsetSize>::from_opt_vec(vec![
+            Some("hello"),
+            Some("foo"),
+            None,
+            Some("world"),
+            None,
+            None,
+        ]);
         assert!(!a.equals(&b));
         assert!(!b.equals(&a));
 
-        let b = GenericStringArray::<OffsetSize>::from_opt_vec(
-            vec![Some("hello"), None, None, Some("arrow"), None, None],
-            datatype.clone(),
-        );
+        let b = GenericStringArray::<OffsetSize>::from_opt_vec(vec![
+            Some("hello"),
+            None,
+            None,
+            Some("arrow"),
+            None,
+            None,
+        ]);
         assert!(!a.equals(&b));
         assert!(!b.equals(&a));
 
@@ -1480,12 +1491,12 @@ mod tests {
 
     #[test]
     fn test_string_equal() {
-        test_generic_string_equal::<i32>(DataType::Utf8)
+        test_generic_string_equal::<i32>()
     }
 
     #[test]
     fn test_large_string_equal() {
-        test_generic_string_equal::<i64>(DataType::LargeUtf8)
+        test_generic_string_equal::<i64>()
     }
 
     #[test]
@@ -1840,9 +1851,14 @@ mod tests {
     #[test]
     fn test_binary_json_equal() {
         // Test the equal case
-        let arrow_array =
-            StringArray::from(vec![Some("hello"), None, None, Some("world"), None, None]);
-        let arrow_array = BinaryArray::from(arrow_array.data());
+        let mut builder = BinaryBuilder::new(6);
+        builder.append_value(b"hello").unwrap();
+        builder.append_null().unwrap();
+        builder.append_null().unwrap();
+        builder.append_value(b"world").unwrap();
+        builder.append_null().unwrap();
+        builder.append_null().unwrap();
+        let arrow_array = builder.finish();
         let json_array: Value = serde_json::from_str(
             r#"
             [
