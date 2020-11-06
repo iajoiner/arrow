@@ -412,49 +412,6 @@ pub struct PrimitiveArray<T: ArrowPrimitiveType> {
 }
 
 impl<T: ArrowPrimitiveType> PrimitiveArray<T> {
-    /// Returns a `Buffer` holding all the values of this array.
-    ///
-    /// Note this doesn't take the offset of this array into account.
-    pub fn values(&self) -> Buffer {
-        self.data.buffers()[0].clone()
-    }
-
-    /// Returns the primitive value at index `i`.
-    ///
-    /// Note this doesn't do any bound checking, for performance reason.
-    pub fn value(&self, i: usize) -> T::Native {
-        let offset = i + self.offset();
-        unsafe { T::index(self.raw_values.get(), offset) }
-    }
-}
-
-impl<T: ArrowPrimitiveType> Array for PrimitiveArray<T> {
-    fn as_any(&self) -> &Any {
-        self
-    }
-
-    fn data(&self) -> ArrayDataRef {
-        self.data.clone()
-    }
-
-    fn data_ref(&self) -> &ArrayDataRef {
-        &self.data
-    }
-
-    /// Returns the total number of bytes of memory occupied by the buffers owned by this [PrimitiveArray].
-    fn get_buffer_memory_size(&self) -> usize {
-        self.data.get_buffer_memory_size()
-    }
-
-    /// Returns the total number of bytes of memory occupied physically by this [PrimitiveArray].
-    fn get_array_memory_size(&self) -> usize {
-        self.data.get_array_memory_size() + mem::size_of_val(self)
-    }
-}
-
-/// Implementation for primitive arrays with numeric types.
-/// Boolean arrays are bit-packed and so implemented separately.
-impl<T: ArrowNumericType> PrimitiveArray<T> {
     pub fn new(length: usize, values: Buffer, null_count: usize, offset: usize) -> Self {
         let array_data = ArrayData::builder(T::DATA_TYPE)
             .len(length)
@@ -492,6 +449,45 @@ impl<T: ArrowNumericType> PrimitiveArray<T> {
     // Returns a new primitive array builder
     pub fn builder(capacity: usize) -> PrimitiveBuilder<T> {
         PrimitiveBuilder::<T>::new(capacity)
+    }
+
+    /// Returns a `Buffer` holding all the values of this array.
+    ///
+    /// Note this doesn't take the offset of this array into account.
+    pub fn values(&self) -> Buffer {
+        self.data.buffers()[0].clone()
+    }
+
+    /// Returns the primitive value at index `i`.
+    ///
+    /// Note this doesn't do any bound checking, for performance reason.
+    pub fn value(&self, i: usize) -> T::Native {
+        let offset = i + self.offset();
+        unsafe { T::index(self.raw_values.get(), offset) }
+    }
+}
+
+impl<T: ArrowPrimitiveType> Array for PrimitiveArray<T> {
+    fn as_any(&self) -> &Any {
+        self
+    }
+
+    fn data(&self) -> ArrayDataRef {
+        self.data.clone()
+    }
+
+    fn data_ref(&self) -> &ArrayDataRef {
+        &self.data
+    }
+
+    /// Returns the total number of bytes of memory occupied by the buffers owned by this [PrimitiveArray].
+    fn get_buffer_memory_size(&self) -> usize {
+        self.data.get_buffer_memory_size()
+    }
+
+    /// Returns the total number of bytes of memory occupied physically by this [PrimitiveArray].
+    fn get_array_memory_size(&self) -> usize {
+        self.data.get_array_memory_size() + mem::size_of_val(self)
     }
 }
 
@@ -642,24 +638,6 @@ impl<T: ArrowPrimitiveType> fmt::Debug for PrimitiveArray<T> {
             _ => fmt::Debug::fmt(&array.value(index), f),
         })?;
         write!(f, "]")
-    }
-}
-
-/// Specific implementation for Boolean arrays due to bit-packing
-impl PrimitiveArray<BooleanType> {
-    pub fn new(length: usize, values: Buffer, null_count: usize, offset: usize) -> Self {
-        let array_data = ArrayData::builder(DataType::Boolean)
-            .len(length)
-            .add_buffer(values)
-            .null_count(null_count)
-            .offset(offset)
-            .build();
-        BooleanArray::from(array_data)
-    }
-
-    // Returns a new primitive array builder
-    pub fn builder(capacity: usize) -> BooleanBuilder {
-        BooleanBuilder::new(capacity)
     }
 }
 
@@ -1024,7 +1002,9 @@ where
     A: Array,
     F: Fn(&A, usize, &mut fmt::Formatter) -> fmt::Result,
 {
-    for i in 0..std::cmp::min(10, array.len()) {
+    let head = std::cmp::min(10, array.len());
+
+    for i in 0..head {
         if array.is_null(i) {
             writeln!(f, "  null,")?;
         } else {
@@ -1037,7 +1017,10 @@ where
         if array.len() > 20 {
             writeln!(f, "  ...{} elements...,", array.len() - 20)?;
         }
-        for i in array.len() - 10..array.len() {
+
+        let tail = std::cmp::max(head, array.len() - 10);
+
+        for i in tail..array.len() {
             if array.is_null(i) {
                 writeln!(f, "  null,")?;
             } else {
@@ -2739,6 +2722,24 @@ mod tests {
             "PrimitiveArray<Int32>\n[\n  0,\n  1,\n  2,\n  3,\n  4,\n]",
             format!("{:?}", arr)
         );
+    }
+
+    #[test]
+    fn test_fmt_debug_up_to_20_elements() {
+        (1..=20).for_each(|i| {
+            let values = (0..i).collect::<Vec<i16>>();
+            let array_expected = format!(
+                "PrimitiveArray<Int16>\n[\n{}\n]",
+                values
+                    .iter()
+                    .map(|v| { format!("  {},", v) })
+                    .collect::<Vec<String>>()
+                    .join("\n")
+            );
+            let array = Int16Array::from(values);
+
+            assert_eq!(array_expected, format!("{:?}", array));
+        })
     }
 
     #[test]
