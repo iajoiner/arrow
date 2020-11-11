@@ -70,7 +70,7 @@ struct BufferData {
 
 impl PartialEq for BufferData {
     fn eq(&self, other: &BufferData) -> bool {
-        if self.capacity != other.capacity {
+        if self.len != other.len {
             return false;
         }
 
@@ -414,6 +414,7 @@ where
 
     let remainder_bytes = ceil(left_chunks.remainder_len(), 8);
     let rem = op(left_chunks.remainder_bits(), right_chunks.remainder_bits());
+    // we are counting its starting from the least significant bit, to to_le_bytes should be correct
     let rem = &rem.to_le_bytes()[0..remainder_bytes];
     result
         .write_all(rem)
@@ -448,6 +449,7 @@ where
 
     let remainder_bytes = ceil(left_chunks.remainder_len(), 8);
     let rem = op(left_chunks.remainder_bits());
+    // we are counting its starting from the least significant bit, to to_le_bytes should be correct
     let rem = &rem.to_le_bytes()[0..remainder_bytes];
     result
         .write_all(rem)
@@ -615,6 +617,12 @@ impl MutableBuffer {
             len: 0,
             capacity: new_capacity,
         }
+    }
+
+    /// creates a new [MutableBuffer] where every bit is initialized to `0`
+    pub fn new_null(len: usize) -> Self {
+        let num_bytes = bit_util::ceil(len, 8);
+        MutableBuffer::new(num_bytes).with_bitset(num_bytes, false)
     }
 
     /// Set the bits in the range of `[0, end)` to 0 (if `val` is false), or 1 (if `val`
@@ -837,7 +845,7 @@ mod tests {
     #[test]
     fn test_buffer_data_equality() {
         let buf1 = Buffer::from(&[0, 1, 2, 3, 4]);
-        let mut buf2 = Buffer::from(&[0, 1, 2, 3, 4]);
+        let buf2 = Buffer::from(&[0, 1, 2, 3, 4]);
         assert_eq!(buf1, buf2);
 
         // slice with same offset should still preserve equality
@@ -846,12 +854,20 @@ mod tests {
         let buf4 = buf2.slice(2);
         assert_eq!(buf3, buf4);
 
+        // Different capacities should still preserve equality
+        let mut buf2 = MutableBuffer::new(65);
+        buf2.write_all(&[0, 1, 2, 3, 4])
+            .expect("write should be OK");
+
+        let buf2 = buf2.freeze();
+        assert_eq!(buf1, buf2);
+
         // unequal because of different elements
-        buf2 = Buffer::from(&[0, 0, 2, 3, 4]);
+        let buf2 = Buffer::from(&[0, 0, 2, 3, 4]);
         assert_ne!(buf1, buf2);
 
         // unequal because of different length
-        buf2 = Buffer::from(&[0, 1, 2, 3]);
+        let buf2 = Buffer::from(&[0, 1, 2, 3]);
         assert_ne!(buf1, buf2);
     }
 
