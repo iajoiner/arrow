@@ -24,7 +24,6 @@ use packed_simd::u8x64;
 use std::cmp;
 use std::convert::AsRef;
 use std::fmt::{Debug, Formatter};
-use std::io::{Error as IoError, ErrorKind, Result as IoResult, Write};
 use std::mem;
 use std::ops::{BitAnd, BitOr, Not};
 use std::ptr::NonNull;
@@ -416,9 +415,7 @@ where
     let rem = op(left_chunks.remainder_bits(), right_chunks.remainder_bits());
     // we are counting its starting from the least significant bit, to to_le_bytes should be correct
     let rem = &rem.to_le_bytes()[0..remainder_bytes];
-    result
-        .write_all(rem)
-        .expect("not enough capacity in buffer");
+    result.extend_from_slice(rem);
 
     result.freeze()
 }
@@ -451,9 +448,7 @@ where
     let rem = op(left_chunks.remainder_bits());
     // we are counting its starting from the least significant bit, to to_le_bytes should be correct
     let rem = &rem.to_le_bytes()[0..remainder_bytes];
-    result
-        .write_all(rem)
-        .expect("not enough capacity in buffer");
+    result.extend_from_slice(rem);
 
     result.freeze()
 }
@@ -657,7 +652,7 @@ impl MutableBuffer {
     /// also ensure the new capacity will be a multiple of 64 bytes.
     ///
     /// Returns the new capacity for this buffer.
-    pub fn reserve(&mut self, capacity: usize) -> Result<usize> {
+    pub fn reserve(&mut self, capacity: usize) -> usize {
         if capacity > self.capacity {
             let new_capacity = bit_util::round_upto_multiple_of_64(capacity);
             let new_capacity = cmp::max(new_capacity, self.capacity * 2);
@@ -666,7 +661,7 @@ impl MutableBuffer {
             self.data = new_data as *mut u8;
             self.capacity = new_capacity;
         }
-        Ok(self.capacity)
+        self.capacity
     }
 
     /// Resizes the buffer so that the `len` will equal to the `new_len`.
@@ -676,9 +671,9 @@ impl MutableBuffer {
     /// `new_len` will be zeroed out.
     ///
     /// If `new_len` is less than `len`, the buffer will be truncated.
-    pub fn resize(&mut self, new_len: usize) -> Result<()> {
+    pub fn resize(&mut self, new_len: usize) -> () {
         if new_len > self.len {
-            self.reserve(new_len)?;
+            self.reserve(new_len);
         } else {
             let new_capacity = bit_util::round_upto_multiple_of_64(new_len);
             if new_capacity < self.capacity {
@@ -689,7 +684,6 @@ impl MutableBuffer {
             }
         }
         self.len = new_len;
-        Ok(())
     }
 
     /// Returns whether this buffer is empty or not.
@@ -774,21 +768,16 @@ impl MutableBuffer {
         }
     }
 
-    /// Writes a byte slice to the underlying buffer and updates the `len`, i.e. the
-    /// number array elements in the buffer.  Also, converts the `io::Result`
-    /// required by the `Write` trait to the Arrow `Result` type.
-    pub fn write_bytes(&mut self, bytes: &[u8], len_added: usize) -> Result<()> {
-        let write_result = self.write(bytes);
-        // `io::Result` has many options one of which we use, so pattern matching is
-        // overkill here
-        if write_result.is_err() {
-            Err(ArrowError::IoError(
-                "Could not write to Buffer, not big enough".to_string(),
-            ))
-        } else {
-            self.len += len_added;
-            Ok(())
+    /// Extends the buffer from a byte slice, incrementing its capacity if needed.
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) {
+        let remaining_capacity = self.capacity - self.len;
+        if bytes.len() > remaining_capacity {
+            self.reserve(self.len + bytes.len());
         }
+        unsafe {
+            memory::memcpy(self.data.add(self.len), bytes.as_ptr(), bytes.len());
+        }
+        self.len += bytes.len();
     }
 }
 
@@ -809,24 +798,6 @@ impl PartialEq for MutableBuffer {
             return false;
         }
         unsafe { memory::memcmp(self.data, other.data, self.len) == 0 }
-    }
-}
-
-impl Write for MutableBuffer {
-    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-        let remaining_capacity = self.capacity - self.len;
-        if buf.len() > remaining_capacity {
-            return Err(IoError::new(ErrorKind::Other, "Buffer not big enough"));
-        }
-        unsafe {
-            memory::memcpy(self.data.add(self.len), buf.as_ptr(), buf.len());
-            self.len += buf.len();
-            Ok(buf.len())
-        }
-    }
-
-    fn flush(&mut self) -> IoResult<()> {
-        Ok(())
     }
 }
 
@@ -856,8 +827,7 @@ mod tests {
 
         // Different capacities should still preserve equality
         let mut buf2 = MutableBuffer::new(65);
-        buf2.write_all(&[0, 1, 2, 3, 4])
-            .expect("write should be OK");
+        buf2.extend_from_slice(&[0, 1, 2, 3, 4]);
 
         let buf2 = buf2.freeze();
         assert_eq!(buf1, buf2);
@@ -995,31 +965,21 @@ mod tests {
     }
 
     #[test]
-    fn test_mutable_write() {
+    fn test_mutable_extend_from_slice() {
         let mut buf = MutableBuffer::new(100);
-        buf.write_all(b"hello").expect("Ok");
+        buf.extend_from_slice(b"hello");
         assert_eq!(5, buf.len());
         assert_eq!(b"hello", buf.data());
 
-        buf.write_all(b" world").expect("Ok");
+        buf.extend_from_slice(b" world");
         assert_eq!(11, buf.len());
         assert_eq!(b"hello world", buf.data());
 
         buf.clear();
         assert_eq!(0, buf.len());
-        buf.write_all(b"hello arrow").expect("Ok");
+        buf.extend_from_slice(b"hello arrow");
         assert_eq!(11, buf.len());
         assert_eq!(b"hello arrow", buf.data());
-    }
-
-    #[test]
-    #[should_panic(expected = "Buffer not big enough")]
-    fn test_mutable_write_overflow() {
-        let mut buf = MutableBuffer::new(1);
-        assert_eq!(64, buf.capacity());
-        for _ in 0..10 {
-            buf.write_all(&[0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
-        }
     }
 
     #[test]
@@ -1028,11 +988,11 @@ mod tests {
         assert_eq!(64, buf.capacity());
 
         // Reserving a smaller capacity should have no effect.
-        let mut new_cap = buf.reserve(10).expect("reserve should be OK");
+        let mut new_cap = buf.reserve(10);
         assert_eq!(64, new_cap);
         assert_eq!(64, buf.capacity());
 
-        new_cap = buf.reserve(100).expect("reserve should be OK");
+        new_cap = buf.reserve(100);
         assert_eq!(128, new_cap);
         assert_eq!(128, buf.capacity());
     }
@@ -1043,23 +1003,23 @@ mod tests {
         assert_eq!(64, buf.capacity());
         assert_eq!(0, buf.len());
 
-        buf.resize(20).expect("resize should be OK");
+        buf.resize(20);
         assert_eq!(64, buf.capacity());
         assert_eq!(20, buf.len());
 
-        buf.resize(10).expect("resize should be OK");
+        buf.resize(10);
         assert_eq!(64, buf.capacity());
         assert_eq!(10, buf.len());
 
-        buf.resize(100).expect("resize should be OK");
+        buf.resize(100);
         assert_eq!(128, buf.capacity());
         assert_eq!(100, buf.len());
 
-        buf.resize(30).expect("resize should be OK");
+        buf.resize(30);
         assert_eq!(64, buf.capacity());
         assert_eq!(30, buf.len());
 
-        buf.resize(0).expect("resize should be OK");
+        buf.resize(0);
         assert_eq!(0, buf.capacity());
         assert_eq!(0, buf.len());
     }
@@ -1067,8 +1027,7 @@ mod tests {
     #[test]
     fn test_mutable_freeze() {
         let mut buf = MutableBuffer::new(1);
-        buf.write_all(b"aaaa bbbb cccc dddd")
-            .expect("write should be OK");
+        buf.extend_from_slice(b"aaaa bbbb cccc dddd");
         assert_eq!(19, buf.len());
         assert_eq!(64, buf.capacity());
         assert_eq!(b"aaaa bbbb cccc dddd", buf.data());
@@ -1084,14 +1043,14 @@ mod tests {
         let mut buf = MutableBuffer::new(1);
         let mut buf2 = MutableBuffer::new(1);
 
-        buf.write_all(&[0xaa])?;
-        buf2.write_all(&[0xaa, 0xbb])?;
+        buf.extend_from_slice(&[0xaa]);
+        buf2.extend_from_slice(&[0xaa, 0xbb]);
         assert!(buf != buf2);
 
-        buf.write_all(&[0xbb])?;
+        buf.extend_from_slice(&[0xbb]);
         assert_eq!(buf, buf2);
 
-        buf2.reserve(65)?;
+        buf2.reserve(65);
         assert!(buf != buf2);
 
         Ok(())
