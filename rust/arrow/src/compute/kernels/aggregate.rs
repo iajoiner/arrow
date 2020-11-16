@@ -94,24 +94,27 @@ where
 {
     let null_count = array.null_count();
 
+    // Includes case array.len() == 0
     if null_count == array.len() {
         return None;
     }
 
-    let mut n: T::Native = T::default_value();
-    let mut has_value = false;
     let data = array.data();
     let m = array.value_slice(0, data.len());
+    let mut n;
 
     if null_count == 0 {
         // optimized path for arrays without null values
-        for item in m {
-            if !has_value || cmp(&n, item) {
-                has_value = true;
+        n = m[0];
+
+        for item in &m[1..] {
+            if cmp(&n, item) {
                 n = *item
             }
         }
     } else {
+        n = T::default_value();
+        let mut has_value = false;
         for (i, item) in m.iter().enumerate() {
             if data.is_valid(i) && (!has_value || cmp(&n, item)) {
                 has_value = true;
@@ -153,7 +156,7 @@ where
             let remainder = data_chunks.remainder();
 
             let bit_chunks = buffer.bit_chunks(array.offset(), array.len());
-            &data_chunks
+            data_chunks
                 .zip(bit_chunks.iter())
                 .for_each(|(chunk, mask)| {
                     chunk.iter().enumerate().for_each(|(i, value)| {
