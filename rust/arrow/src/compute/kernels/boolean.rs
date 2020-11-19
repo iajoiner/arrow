@@ -75,18 +75,62 @@ where
 
 /// Performs `AND` operation on two arrays. If either left or right value is null then the
 /// result is also null.
+/// # Error
+/// This function errors when the arrays have different lengths.
+/// # Example
+/// ```rust
+/// use arrow::array::BooleanArray;
+/// use arrow::error::Result;
+/// use arrow::compute::kernels::boolean::and;
+/// # fn main() -> Result<()> {
+/// let a = BooleanArray::from(vec![Some(false), Some(true), None]);
+/// let b = BooleanArray::from(vec![Some(true), Some(true), Some(false)]);
+/// let and_ab = and(&a, &b)?;
+/// assert_eq!(and_ab, BooleanArray::from(vec![Some(false), Some(true), None]));
+/// # Ok(())
+/// # }
+/// ```
 pub fn and(left: &BooleanArray, right: &BooleanArray) -> Result<BooleanArray> {
     binary_boolean_kernel(&left, &right, buffer_bin_and)
 }
 
 /// Performs `OR` operation on two arrays. If either left or right value is null then the
 /// result is also null.
+/// # Error
+/// This function errors when the arrays have different lengths.
+/// # Example
+/// ```rust
+/// use arrow::array::BooleanArray;
+/// use arrow::error::Result;
+/// use arrow::compute::kernels::boolean::or;
+/// # fn main() -> Result<()> {
+/// let a = BooleanArray::from(vec![Some(false), Some(true), None]);
+/// let b = BooleanArray::from(vec![Some(true), Some(true), Some(false)]);
+/// let or_ab = or(&a, &b)?;
+/// assert_eq!(or_ab, BooleanArray::from(vec![Some(true), Some(true), None]));
+/// # Ok(())
+/// # }
+/// ```
 pub fn or(left: &BooleanArray, right: &BooleanArray) -> Result<BooleanArray> {
     binary_boolean_kernel(&left, &right, buffer_bin_or)
 }
 
 /// Performs unary `NOT` operation on an arrays. If value is null then the result is also
 /// null.
+/// # Error
+/// This function never errors. It returns an error for consistency.
+/// # Example
+/// ```rust
+/// use arrow::array::BooleanArray;
+/// use arrow::error::Result;
+/// use arrow::compute::kernels::boolean::not;
+/// # fn main() -> Result<()> {
+/// let a = BooleanArray::from(vec![Some(false), Some(true), None]);
+/// let not_a = not(&a)?;
+/// assert_eq!(not_a, BooleanArray::from(vec![Some(true), Some(false), None]));
+/// # Ok(())
+/// # }
+/// ```
 pub fn not(left: &BooleanArray) -> Result<BooleanArray> {
     let left_offset = left.offset();
     let len = left.len();
@@ -159,10 +203,10 @@ mod tests {
         let a = BooleanArray::from(vec![false, false, true, true]);
         let b = BooleanArray::from(vec![false, true, false, true]);
         let c = and(&a, &b).unwrap();
-        assert_eq!(false, c.value(0));
-        assert_eq!(false, c.value(1));
-        assert_eq!(false, c.value(2));
-        assert_eq!(true, c.value(3));
+
+        let expected = BooleanArray::from(vec![false, false, false, true]);
+
+        assert_eq!(c, expected);
     }
 
     #[test]
@@ -170,42 +214,102 @@ mod tests {
         let a = BooleanArray::from(vec![false, false, true, true]);
         let b = BooleanArray::from(vec![false, true, false, true]);
         let c = or(&a, &b).unwrap();
-        assert_eq!(false, c.value(0));
-        assert_eq!(true, c.value(1));
-        assert_eq!(true, c.value(2));
-        assert_eq!(true, c.value(3));
+
+        let expected = BooleanArray::from(vec![false, true, true, true]);
+
+        assert_eq!(c, expected);
     }
 
     #[test]
     fn test_bool_array_or_nulls() {
-        let a = BooleanArray::from(vec![None, Some(false), None, Some(false)]);
-        let b = BooleanArray::from(vec![None, None, Some(false), Some(false)]);
+        let a = BooleanArray::from(vec![
+            None,
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(true),
+            Some(true),
+        ]);
+        let b = BooleanArray::from(vec![
+            None,
+            Some(false),
+            Some(true),
+            None,
+            Some(false),
+            Some(true),
+            None,
+            Some(false),
+            Some(true),
+        ]);
         let c = or(&a, &b).unwrap();
-        assert_eq!(true, c.is_null(0));
-        assert_eq!(true, c.is_null(1));
-        assert_eq!(true, c.is_null(2));
-        assert_eq!(false, c.is_null(3));
+
+        let expected = BooleanArray::from(vec![
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(true),
+            None,
+            Some(true),
+            Some(true),
+        ]);
+
+        assert_eq!(c, expected);
     }
 
     #[test]
     fn test_bool_array_not() {
-        let a = BooleanArray::from(vec![false, false, true, true]);
+        let a = BooleanArray::from(vec![false, true]);
         let c = not(&a).unwrap();
-        assert_eq!(true, c.value(0));
-        assert_eq!(true, c.value(1));
-        assert_eq!(false, c.value(2));
-        assert_eq!(false, c.value(3));
+
+        let expected = BooleanArray::from(vec![true, false]);
+
+        assert_eq!(c, expected);
     }
 
     #[test]
     fn test_bool_array_and_nulls() {
-        let a = BooleanArray::from(vec![None, Some(false), None, Some(false)]);
-        let b = BooleanArray::from(vec![None, None, Some(false), Some(false)]);
+        let a = BooleanArray::from(vec![
+            None,
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(true),
+            Some(true),
+        ]);
+        let b = BooleanArray::from(vec![
+            None,
+            Some(false),
+            Some(true),
+            None,
+            Some(false),
+            Some(true),
+            None,
+            Some(false),
+            Some(true),
+        ]);
         let c = and(&a, &b).unwrap();
-        assert_eq!(true, c.is_null(0));
-        assert_eq!(true, c.is_null(1));
-        assert_eq!(true, c.is_null(2));
-        assert_eq!(false, c.is_null(3));
+
+        let expected = BooleanArray::from(vec![
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(false),
+            None,
+            Some(false),
+            Some(true),
+        ]);
+
+        assert_eq!(c, expected);
     }
 
     #[test]
@@ -225,11 +329,10 @@ mod tests {
         let b = b.as_any().downcast_ref::<BooleanArray>().unwrap();
 
         let c = and(&a, &b).unwrap();
-        assert_eq!(4, c.len());
-        assert_eq!(false, c.value(0));
-        assert_eq!(false, c.value(1));
-        assert_eq!(false, c.value(2));
-        assert_eq!(true, c.value(3));
+
+        let expected = BooleanArray::from(vec![false, false, false, true]);
+
+        assert_eq!(expected, c);
     }
 
     #[test]
@@ -249,11 +352,10 @@ mod tests {
         let b = b.as_any().downcast_ref::<BooleanArray>().unwrap();
 
         let c = and(&a, &b).unwrap();
-        assert_eq!(4, c.len());
-        assert_eq!(false, c.value(0));
-        assert_eq!(false, c.value(1));
-        assert_eq!(false, c.value(2));
-        assert_eq!(true, c.value(3));
+
+        let expected = BooleanArray::from(vec![false, false, false, true]);
+
+        assert_eq!(expected, c);
     }
 
     #[test]
@@ -268,11 +370,10 @@ mod tests {
         let a = a.as_any().downcast_ref::<BooleanArray>().unwrap();
 
         let c = and(&a, &b).unwrap();
-        assert_eq!(4, c.len());
-        assert_eq!(false, c.value(0));
-        assert_eq!(false, c.value(1));
-        assert_eq!(false, c.value(2));
-        assert_eq!(true, c.value(3));
+
+        let expected = BooleanArray::from(vec![false, false, false, true]);
+
+        assert_eq!(expected, c);
     }
 
     #[test]
@@ -287,11 +388,36 @@ mod tests {
         let b = b.as_any().downcast_ref::<BooleanArray>().unwrap();
 
         let c = and(&a, &b).unwrap();
-        assert_eq!(4, c.len());
-        assert_eq!(false, c.value(0));
-        assert_eq!(false, c.value(1));
-        assert_eq!(false, c.value(2));
-        assert_eq!(true, c.value(3));
+
+        let expected = BooleanArray::from(vec![false, false, false, true]);
+
+        assert_eq!(expected, c);
+    }
+
+    #[test]
+    fn test_bool_array_and_nulls_offset() {
+        let a = BooleanArray::from(vec![None, Some(false), Some(true), None, Some(true)]);
+        let a = a.slice(1, 4);
+        let a = a.as_any().downcast_ref::<BooleanArray>().unwrap();
+
+        let b = BooleanArray::from(vec![
+            None,
+            None,
+            Some(true),
+            Some(false),
+            Some(true),
+            Some(true),
+        ]);
+
+        let b = b.slice(2, 4);
+        let b = b.as_any().downcast_ref::<BooleanArray>().unwrap();
+
+        let c = and(&a, &b).unwrap();
+
+        let expected =
+            BooleanArray::from(vec![Some(false), Some(false), None, Some(true)]);
+
+        assert_eq!(expected, c);
     }
 
     #[test]
@@ -300,13 +426,10 @@ mod tests {
 
         let res = is_null(&a).unwrap();
 
-        assert_eq!(4, res.len());
-        assert_eq!(0, res.null_count());
+        let expected = BooleanArray::from(vec![false, false, false, false]);
+
+        assert_eq!(expected, res);
         assert_eq!(&None, res.data_ref().null_bitmap());
-        assert_eq!(false, res.value(0));
-        assert_eq!(false, res.value(1));
-        assert_eq!(false, res.value(2));
-        assert_eq!(false, res.value(3));
     }
 
     #[test]
@@ -318,13 +441,10 @@ mod tests {
 
         let res = is_null(&a).unwrap();
 
-        assert_eq!(4, res.len());
-        assert_eq!(0, res.null_count());
+        let expected = BooleanArray::from(vec![false, false, false, false]);
+
+        assert_eq!(expected, res);
         assert_eq!(&None, res.data_ref().null_bitmap());
-        assert_eq!(false, res.value(0));
-        assert_eq!(false, res.value(1));
-        assert_eq!(false, res.value(2));
-        assert_eq!(false, res.value(3));
     }
 
     #[test]
@@ -333,13 +453,10 @@ mod tests {
 
         let res = is_not_null(&a).unwrap();
 
-        assert_eq!(4, res.len());
-        assert_eq!(0, res.null_count());
+        let expected = BooleanArray::from(vec![true, true, true, true]);
+
+        assert_eq!(expected, res);
         assert_eq!(&None, res.data_ref().null_bitmap());
-        assert_eq!(true, res.value(0));
-        assert_eq!(true, res.value(1));
-        assert_eq!(true, res.value(2));
-        assert_eq!(true, res.value(3));
     }
 
     #[test]
@@ -351,13 +468,10 @@ mod tests {
 
         let res = is_not_null(&a).unwrap();
 
-        assert_eq!(4, res.len());
-        assert_eq!(0, res.null_count());
+        let expected = BooleanArray::from(vec![true, true, true, true]);
+
+        assert_eq!(expected, res);
         assert_eq!(&None, res.data_ref().null_bitmap());
-        assert_eq!(true, res.value(0));
-        assert_eq!(true, res.value(1));
-        assert_eq!(true, res.value(2));
-        assert_eq!(true, res.value(3));
     }
 
     #[test]
@@ -366,13 +480,10 @@ mod tests {
 
         let res = is_null(&a).unwrap();
 
-        assert_eq!(4, res.len());
-        assert_eq!(0, res.null_count());
+        let expected = BooleanArray::from(vec![false, true, false, true]);
+
+        assert_eq!(expected, res);
         assert_eq!(&None, res.data_ref().null_bitmap());
-        assert_eq!(false, res.value(0));
-        assert_eq!(true, res.value(1));
-        assert_eq!(false, res.value(2));
-        assert_eq!(true, res.value(3));
     }
 
     #[test]
@@ -400,13 +511,10 @@ mod tests {
 
         let res = is_null(&a).unwrap();
 
-        assert_eq!(4, res.len());
-        assert_eq!(0, res.null_count());
+        let expected = BooleanArray::from(vec![false, true, false, true]);
+
+        assert_eq!(expected, res);
         assert_eq!(&None, res.data_ref().null_bitmap());
-        assert_eq!(false, res.value(0));
-        assert_eq!(true, res.value(1));
-        assert_eq!(false, res.value(2));
-        assert_eq!(true, res.value(3));
     }
 
     #[test]
@@ -415,13 +523,10 @@ mod tests {
 
         let res = is_not_null(&a).unwrap();
 
-        assert_eq!(4, res.len());
-        assert_eq!(0, res.null_count());
+        let expected = BooleanArray::from(vec![true, false, true, false]);
+
+        assert_eq!(expected, res);
         assert_eq!(&None, res.data_ref().null_bitmap());
-        assert_eq!(true, res.value(0));
-        assert_eq!(false, res.value(1));
-        assert_eq!(true, res.value(2));
-        assert_eq!(false, res.value(3));
     }
 
     #[test]
@@ -449,12 +554,9 @@ mod tests {
 
         let res = is_not_null(&a).unwrap();
 
-        assert_eq!(4, res.len());
-        assert_eq!(0, res.null_count());
+        let expected = BooleanArray::from(vec![true, false, true, false]);
+
+        assert_eq!(expected, res);
         assert_eq!(&None, res.data_ref().null_bitmap());
-        assert_eq!(true, res.value(0));
-        assert_eq!(false, res.value(1));
-        assert_eq!(true, res.value(2));
-        assert_eq!(false, res.value(3));
     }
 }
