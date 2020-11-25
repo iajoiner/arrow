@@ -99,7 +99,7 @@ BuildRequires:	utf8proc-devel
 %endif
 BuildRequires:	zlib-devel
 
-%if %{use_flight}
+%if %{use_parquet}
 BuildRequires:	openssl-devel
 %endif
 
@@ -155,6 +155,9 @@ cd cpp/build
   -DARROW_WITH_ZSTD=ON \
   -DCMAKE_BUILD_TYPE=$cpp_build_type \
   -DCMAKE_UNITY_BUILD=ON \
+%if %{use_parquet}
+  -DPARQUET_REQUIRE_ENCRYPTION=ON \
+%endif
   -DPythonInterp_FIND_VERSION=ON \
   -DPythonInterp_FIND_VERSION_MAJOR=3 \
 %if %{use_ninja}
@@ -263,6 +266,26 @@ This package contains the libraries for Apache Arrow C++.
 Summary:	Libraries and header files for Apache Arrow C++
 License:	Apache-2.0
 Requires:	%{name}-libs = %{version}-%{release}
+%if %{have_brotli}
+Requires:	brotli-devel
+%endif
+Requires:	bzip2-devel
+Requires:	libzstd-devel
+Requires:	lz4-devel
+%if %{use_parquet}
+Requires:	openssl-devel
+%endif
+%if %{have_rapidjson}
+Requires:	rapidjson-devel
+%endif
+%if %{have_re2}
+Requires:	re2-devel
+%endif
+Requires:	snappy-devel
+%if %{have_utf8proc}
+Requires:	utf8proc-devel
+%endif
+Requires:	zlib-devel
 
 %description devel
 Libraries and header files for Apache Arrow C++.
@@ -284,6 +307,9 @@ Libraries and header files for Apache Arrow C++.
 %{_libdir}/cmake/arrow/FindBrotli.cmake
 %endif
 %{_libdir}/cmake/arrow/FindLz4.cmake
+%if %{have_re2}
+%{_libdir}/cmake/arrow/FindRE2.cmake
+%endif
 %{_libdir}/cmake/arrow/FindSnappy.cmake
 %if %{have_utf8proc}
 %{_libdir}/cmake/arrow/Findutf8proc.cmake
@@ -398,9 +424,6 @@ Libraries and header files for Gandiva.
 %{_libdir}/cmake/arrow/GandivaConfig*.cmake
 %{_libdir}/cmake/arrow/GandivaTargets*.cmake
 %{_libdir}/cmake/arrow/FindGandiva.cmake
-%if %{have_re2}
-%{_libdir}/cmake/arrow/FindRE2.cmake
-%endif
 %{_libdir}/libgandiva.a
 %{_libdir}/libgandiva.so
 %{_libdir}/pkgconfig/gandiva.pc
@@ -448,7 +471,6 @@ Summary:	Python integration library for Apache Arrow Flight
 License:	Apache-2.0
 Requires:	%{name}-flight-libs = %{version}-%{release}
 Requires:	%{name}-python-libs = %{version}-%{release}
-Requires:	openssl
 
 %description python-flight-libs
 This package contains the Python integration library for Apache Arrow Flight.
@@ -532,6 +554,7 @@ Summary:	Runtime libraries for Apache Parquet C++
 License:	Apache-2.0
 Requires:	boost%{boost_version}-program-options
 Requires:	%{name}-libs = %{version}-%{release}
+Requires:	openssl
 
 %description -n parquet-libs
 This package contains the libraries for Apache Parquet C++.
