@@ -70,8 +70,6 @@ pub enum Expr {
         /// Right-hand side of the expression
         right: Box<Expr>,
     },
-    /// Parenthesized expression. E.g. `(foo > bar)` or `(1)`
-    Nested(Box<Expr>),
     /// Negation of an expression. The expression's type must be a boolean to make sense.
     Not(Box<Expr>),
     /// Whether an expression is not Null. This expression is never null.
@@ -213,7 +211,6 @@ impl Expr {
             Expr::Wildcard => Err(DataFusionError::Internal(
                 "Wildcard expressions are not valid in a logical query plan".to_owned(),
             )),
-            Expr::Nested(e) => e.get_type(schema),
         }
     }
 
@@ -261,7 +258,6 @@ impl Expr {
                 ..
             } => Ok(left.nullable(input_schema)? || right.nullable(input_schema)?),
             Expr::Sort { ref expr, .. } => expr.nullable(input_schema),
-            Expr::Nested(e) => e.nullable(input_schema),
             Expr::Wildcard => Err(DataFusionError::Internal(
                 "Wildcard expressions are not valid in a logical query plan".to_owned(),
             )),
@@ -309,32 +305,32 @@ impl Expr {
 
     /// Equal
     pub fn eq(&self, other: Expr) -> Expr {
-        binary_expr(self.clone(), Operator::Eq, other.clone())
+        binary_expr(self.clone(), Operator::Eq, other)
     }
 
     /// Not equal
     pub fn not_eq(&self, other: Expr) -> Expr {
-        binary_expr(self.clone(), Operator::NotEq, other.clone())
+        binary_expr(self.clone(), Operator::NotEq, other)
     }
 
     /// Greater than
     pub fn gt(&self, other: Expr) -> Expr {
-        binary_expr(self.clone(), Operator::Gt, other.clone())
+        binary_expr(self.clone(), Operator::Gt, other)
     }
 
     /// Greater than or equal to
     pub fn gt_eq(&self, other: Expr) -> Expr {
-        binary_expr(self.clone(), Operator::GtEq, other.clone())
+        binary_expr(self.clone(), Operator::GtEq, other)
     }
 
     /// Less than
     pub fn lt(&self, other: Expr) -> Expr {
-        binary_expr(self.clone(), Operator::Lt, other.clone())
+        binary_expr(self.clone(), Operator::Lt, other)
     }
 
     /// Less than or equal to
     pub fn lt_eq(&self, other: Expr) -> Expr {
-        binary_expr(self.clone(), Operator::LtEq, other.clone())
+        binary_expr(self.clone(), Operator::LtEq, other)
     }
 
     /// And
@@ -354,17 +350,17 @@ impl Expr {
 
     /// Calculate the modulus of two expressions
     pub fn modulus(&self, other: Expr) -> Expr {
-        binary_expr(self.clone(), Operator::Modulus, other.clone())
+        binary_expr(self.clone(), Operator::Modulus, other)
     }
 
     /// like (string) another expression
     pub fn like(&self, other: Expr) -> Expr {
-        binary_expr(self.clone(), Operator::Like, other.clone())
+        binary_expr(self.clone(), Operator::Like, other)
     }
 
     /// not like another expression
     pub fn not_like(&self, other: Expr) -> Expr {
-        binary_expr(self.clone(), Operator::NotLike, other.clone())
+        binary_expr(self.clone(), Operator::NotLike, other)
     }
 
     /// Alias
@@ -770,7 +766,6 @@ impl fmt::Debug for Expr {
                 fmt_function(f, &fun.name, false, args)
             }
             Expr::Wildcard => write!(f, "*"),
-            Expr::Nested(expr) => write!(f, "({:?})", expr),
         }
     }
 }
@@ -804,6 +799,24 @@ fn create_name(e: &Expr, input_schema: &Schema) -> Result<String> {
             let left = create_name(left, input_schema)?;
             let right = create_name(right, input_schema)?;
             Ok(format!("{} {:?} {}", left, op, right))
+        }
+        Expr::Case {
+            expr,
+            when_then_expr,
+            else_expr,
+        } => {
+            let mut name = "CASE ".to_string();
+            if let Some(e) = expr {
+                name += &format!("{:?} ", e);
+            }
+            for (w, t) in when_then_expr {
+                name += &format!("WHEN {:?} THEN {:?} ", w, t);
+            }
+            if let Some(e) = else_expr {
+                name += &format!("ELSE {:?} ", e);
+            }
+            name += "END";
+            Ok(name)
         }
         Expr::Cast { expr, data_type } => {
             let expr = create_name(expr, input_schema)?;
