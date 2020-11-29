@@ -929,12 +929,8 @@ mod tests {
     fn test_filter_array_low_density() {
         // this test exercises the all 0's branch of the filter algorithm
         let mut data_values = (1..=65).collect::<Vec<i32>>();
-        let mut filter_values = (1..=65)
-            .map(|i| match i % 65 {
-                0 => true,
-                _ => false,
-            })
-            .collect::<Vec<bool>>();
+        let mut filter_values =
+            (1..=65).map(|i| matches!(i % 65, 0)).collect::<Vec<bool>>();
         // set up two more values after the batch
         data_values.extend_from_slice(&[66, 67]);
         filter_values.extend_from_slice(&[false, true]);
@@ -952,10 +948,7 @@ mod tests {
         // this test exercises the all 1's branch of the filter algorithm
         let mut data_values = (1..=65).map(Some).collect::<Vec<_>>();
         let mut filter_values = (1..=65)
-            .map(|i| match i % 65 {
-                0 => false,
-                _ => true,
-            })
+            .map(|i| !matches!(i % 65, 0))
             .collect::<Vec<bool>>();
         // set second data value to null
         data_values[1] = None;
@@ -1087,7 +1080,7 @@ mod tests {
         let value_offsets = Buffer::from(&[0i64, 3, 6, 8, 8].to_byte_slice());
 
         let list_data_type =
-            DataType::LargeList(Box::new(Field::new("item", DataType::Int32, false)));
+            DataType::LargeList(Box::new(NullableDataType::new(DataType::Int32, false)));
         let list_data = ArrayData::builder(list_data_type)
             .len(4)
             .add_buffer(value_offsets)

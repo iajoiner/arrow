@@ -129,6 +129,7 @@ fn write_leaves(
 ) -> Result<()> {
     match array.data_type() {
         ArrowDataType::Null
+        | ArrowDataType::Boolean
         | ArrowDataType::Int8
         | ArrowDataType::Int16
         | ArrowDataType::Int32
@@ -263,7 +264,6 @@ fn write_leaves(
             "Float16 arrays not supported".to_string(),
         )),
         ArrowDataType::FixedSizeList(_, _)
-        | ArrowDataType::Boolean
         | ArrowDataType::FixedSizeBinary(_)
         | ArrowDataType::Decimal(_, _)
         | ArrowDataType::Union(_) => Err(ParquetError::NYI(
@@ -351,8 +351,13 @@ fn write_leaf(
                 levels.repetition.as_deref(),
             )?
         }
-        ColumnWriter::BoolColumnWriter(ref mut _typed) => {
-            unreachable!("Currently unreachable because data type not supported")
+        ColumnWriter::BoolColumnWriter(ref mut typed) => {
+            let array = arrow_array::BooleanArray::from(column.data());
+            typed.write_batch(
+                get_bool_array_slice(&array).as_slice(),
+                Some(levels.definition.as_slice()),
+                levels.repetition.as_deref(),
+            )?
         }
         ColumnWriter::Int64ColumnWriter(ref mut typed) => {
             let array = arrow_array::Int64Array::from(column.data());
@@ -525,8 +530,8 @@ fn get_levels(
                     definition: list_def_levels,
                     repetition: Some(list_rep_levels),
                 }],
-                ArrowDataType::Boolean => unimplemented!(),
-                ArrowDataType::Int8
+                ArrowDataType::Boolean
+                | ArrowDataType::Int8
                 | ArrowDataType::Int16
                 | ArrowDataType::Int32
                 | ArrowDataType::Int64
@@ -665,6 +670,16 @@ where
     values
 }
 
+fn get_bool_array_slice(array: &arrow_array::BooleanArray) -> Vec<bool> {
+    let mut values = Vec::with_capacity(array.len() - array.null_count());
+    for i in 0..array.len() {
+        if array.is_valid(i) {
+            values.push(array.value(i))
+        }
+    }
+    values
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,8 +688,8 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::*;
-    use arrow::datatypes::ToByteSlice;
     use arrow::datatypes::{DataType, Field, Schema, UInt32Type, UInt8Type};
+    use arrow::datatypes::{NullableDataType, ToByteSlice};
     use arrow::record_batch::RecordBatch;
 
     use crate::arrow::{ArrowReader, ParquetFileArrowReader};
@@ -761,7 +776,7 @@ mod tests {
         // define schema
         let schema = Schema::new(vec![Field::new(
             "a",
-            DataType::List(Box::new(Field::new("item", DataType::Int32, true))),
+            DataType::List(Box::new(NullableDataType::new(DataType::Int32, true))),
             false,
         )]);
 
@@ -774,11 +789,9 @@ mod tests {
             arrow::buffer::Buffer::from(&[0, 1, 3, 3, 6, 10].to_byte_slice());
 
         // Construct a list array from the above two
-        let a_list_data = ArrayData::builder(DataType::List(Box::new(Field::new(
-            "items",
-            DataType::Int32,
-            true,
-        ))))
+        let a_list_data = ArrayData::builder(DataType::List(Box::new(
+            NullableDataType::new(DataType::Int32, true),
+        )))
         .len(5)
         .add_buffer(a_value_offsets)
         .add_child_data(a_values.data())
@@ -861,7 +874,7 @@ mod tests {
         let struct_field_f = Field::new("f", DataType::Float32, true);
         let struct_field_g = Field::new(
             "g",
-            DataType::List(Box::new(Field::new("items", DataType::Int16, false))),
+            DataType::List(Box::new(NullableDataType::new(DataType::Int16, false))),
             false,
         );
         let struct_field_e = Field::new(
@@ -1023,9 +1036,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "Attempting to write an Arrow type that is not yet implemented"
-    )]
     fn bool_single_column() {
         required_and_optional::<BooleanArray, _>(
             [true, false].iter().cycle().copied().take(SMALL_SIZE),
@@ -1285,11 +1295,9 @@ mod tests {
         let a_values = Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         let a_value_offsets =
             arrow::buffer::Buffer::from(&[0, 1, 3, 3, 6, 10].to_byte_slice());
-        let a_list_data = ArrayData::builder(DataType::List(Box::new(Field::new(
-            "item",
-            DataType::Int32,
-            true,
-        ))))
+        let a_list_data = ArrayData::builder(DataType::List(Box::new(
+            NullableDataType::new(DataType::Int32, true),
+        )))
         .len(5)
         .add_buffer(a_value_offsets)
         .add_child_data(a_values.data())
@@ -1310,11 +1318,9 @@ mod tests {
         let a_values = Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         let a_value_offsets =
             arrow::buffer::Buffer::from(&[0i64, 1, 3, 3, 6, 10].to_byte_slice());
-        let a_list_data = ArrayData::builder(DataType::LargeList(Box::new(Field::new(
-            "large_item",
-            DataType::Int32,
-            true,
-        ))))
+        let a_list_data = ArrayData::builder(DataType::LargeList(Box::new(
+            NullableDataType::new(DataType::Int32, true),
+        )))
         .len(5)
         .add_buffer(a_value_offsets)
         .add_child_data(a_values.data())

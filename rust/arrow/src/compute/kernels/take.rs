@@ -212,39 +212,57 @@ where
 
     let array = values.as_any().downcast_ref::<PrimitiveArray<T>>().unwrap();
 
-    let num_bytes = bit_util::ceil(data_len, 8);
-    let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
-
-    let null_slice = null_buf.data_mut();
+    let null_count = array.null_count();
 
     // This iteration is implemented with a while loop, rather than a
     // map()/collect(), since the while loop performs better in the benchmarks.
     let mut new_values: Vec<T::Native> = Vec::with_capacity(data_len);
-    let mut i = 0;
-    while i < data_len {
-        let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
-            ArrowError::ComputeError("Cast to usize failed".to_string())
-        })?;
+    let nulls;
 
-        if array.is_null(index) {
-            bit_util::unset_bit(null_slice, i);
+    if null_count == 0 {
+        // Take indices without null checking
+        for i in 0..data_len {
+            let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
+                ArrowError::ComputeError("Cast to usize failed".to_string())
+            })?;
+
+            new_values.push(array.value(index));
         }
+        nulls = indices.data_ref().null_buffer().cloned();
+    } else {
+        let num_bytes = bit_util::ceil(data_len, 8);
+        let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
 
-        new_values.push(array.value(index));
+        let null_slice = null_buf.data_mut();
 
-        i += 1;
+        for i in 0..data_len {
+            let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
+                ArrowError::ComputeError("Cast to usize failed".to_string())
+            })?;
+
+            if array.is_null(index) {
+                bit_util::unset_bit(null_slice, i);
+            }
+
+            new_values.push(array.value(index));
+        }
+        nulls = match indices.data_ref().null_buffer() {
+            Some(buffer) => Some(buffer_bin_and(
+                buffer,
+                0,
+                &null_buf.freeze(),
+                0,
+                indices.len(),
+            )),
+            None => Some(null_buf.freeze()),
+        };
     }
-
-    let nulls = match indices.data_ref().null_buffer() {
-        Some(buffer) => buffer_bin_and(buffer, 0, &null_buf.freeze(), 0, indices.len()),
-        None => null_buf.freeze(),
-    };
 
     let data = ArrayData::new(
         T::DATA_TYPE,
         indices.len(),
         None,
-        Some(nulls),
+        nulls,
         0,
         vec![Buffer::from(new_values.to_byte_slice())],
         vec![],
@@ -266,36 +284,62 @@ where
     let array = values.as_any().downcast_ref::<BooleanArray>().unwrap();
 
     let num_byte = bit_util::ceil(data_len, 8);
-    let mut null_buf = MutableBuffer::new(num_byte).with_bitset(num_byte, true);
     let mut val_buf = MutableBuffer::new(num_byte).with_bitset(num_byte, false);
 
-    let null_slice = null_buf.data_mut();
     let val_slice = val_buf.data_mut();
 
-    (0..data_len).try_for_each::<_, Result<()>>(|i| {
-        let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
-            ArrowError::ComputeError("Cast to usize failed".to_string())
+    let null_count = array.null_count();
+
+    let nulls;
+    if null_count == 0 {
+        (0..data_len).try_for_each::<_, Result<()>>(|i| {
+            let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
+                ArrowError::ComputeError("Cast to usize failed".to_string())
+            })?;
+
+            if array.value(index) {
+                bit_util::set_bit(val_slice, i);
+            }
+
+            Ok(())
         })?;
 
-        if array.is_null(index) {
-            bit_util::unset_bit(null_slice, i);
-        } else if array.value(index) {
-            bit_util::set_bit(val_slice, i);
-        }
+        nulls = indices.data_ref().null_buffer().cloned();
+    } else {
+        let mut null_buf = MutableBuffer::new(num_byte).with_bitset(num_byte, true);
+        let null_slice = null_buf.data_mut();
 
-        Ok(())
-    })?;
+        (0..data_len).try_for_each::<_, Result<()>>(|i| {
+            let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
+                ArrowError::ComputeError("Cast to usize failed".to_string())
+            })?;
 
-    let nulls = match indices.data_ref().null_buffer() {
-        Some(buffer) => buffer_bin_and(buffer, 0, &null_buf.freeze(), 0, indices.len()),
-        None => null_buf.freeze(),
-    };
+            if array.is_null(index) {
+                bit_util::unset_bit(null_slice, i);
+            } else if array.value(index) {
+                bit_util::set_bit(val_slice, i);
+            }
+
+            Ok(())
+        })?;
+
+        nulls = match indices.data_ref().null_buffer() {
+            Some(buffer) => Some(buffer_bin_and(
+                buffer,
+                0,
+                &null_buf.freeze(),
+                0,
+                indices.len(),
+            )),
+            None => Some(null_buf.freeze()),
+        };
+    }
 
     let data = ArrayData::new(
         DataType::Boolean,
         indices.len(),
         None,
-        Some(nulls),
+        nulls,
         0,
         vec![val_buf.freeze()],
         vec![],
@@ -766,11 +810,9 @@ mod tests {
             let value_offsets: [$offset_type; 4] = [0, 3, 6, 8];
             let value_offsets = Buffer::from(&value_offsets.to_byte_slice());
             // Construct a list array from the above two
-            let list_data_type = DataType::$list_data_type(Box::new(Field::new(
-                "item",
-                DataType::Int32,
-                false,
-            )));
+            let list_data_type = DataType::$list_data_type(Box::new(
+                NullableDataType::new(DataType::Int32, false),
+            ));
             let list_data = ArrayData::builder(list_data_type.clone())
                 .len(3)
                 .add_buffer(value_offsets)
@@ -839,11 +881,9 @@ mod tests {
             let value_offsets: [$offset_type; 5] = [0, 3, 6, 7, 9];
             let value_offsets = Buffer::from(&value_offsets.to_byte_slice());
             // Construct a list array from the above two
-            let list_data_type = DataType::$list_data_type(Box::new(Field::new(
-                "item",
-                DataType::Int32,
-                false,
-            )));
+            let list_data_type = DataType::$list_data_type(Box::new(
+                NullableDataType::new(DataType::Int32, false),
+            ));
             let list_data = ArrayData::builder(list_data_type.clone())
                 .len(4)
                 .add_buffer(value_offsets)
@@ -912,11 +952,9 @@ mod tests {
             let value_offsets: [$offset_type; 5] = [0, 3, 6, 6, 8];
             let value_offsets = Buffer::from(&value_offsets.to_byte_slice());
             // Construct a list array from the above two
-            let list_data_type = DataType::$list_data_type(Box::new(Field::new(
-                "item",
-                DataType::Int32,
-                false,
-            )));
+            let list_data_type = DataType::$list_data_type(Box::new(
+                NullableDataType::new(DataType::Int32, false),
+            ));
             let list_data = ArrayData::builder(list_data_type.clone())
                 .len(4)
                 .add_buffer(value_offsets)
@@ -1007,7 +1045,7 @@ mod tests {
         let value_offsets = Buffer::from(&[0, 3, 6, 8].to_byte_slice());
         // Construct a list array from the above two
         let list_data_type =
-            DataType::List(Box::new(Field::new("item", DataType::Int32, false)));
+            DataType::List(Box::new(NullableDataType::new(DataType::Int32, false)));
         let list_data = ArrayData::builder(list_data_type)
             .len(3)
             .add_buffer(value_offsets)
