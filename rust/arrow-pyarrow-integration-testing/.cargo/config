@@ -15,4 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-arm64v8/debian:stretch
+[target.x86_64-apple-darwin]
+rustflags = [
+  "-C", "link-arg=-undefined",
+  "-C", "link-arg=dynamic_lookup",
+]

@@ -89,7 +89,7 @@ fn create_array(
             buffer_index += 2;
             array
         }
-        List(ref type_ctx) | LargeList(ref type_ctx) => {
+        List(ref list_field) | LargeList(ref list_field) => {
             let list_node = &nodes[node_index];
             let list_buffers: Vec<Buffer> = buffers[buffer_index..buffer_index + 2]
                 .iter()
@@ -99,7 +99,7 @@ fn create_array(
             buffer_index += 2;
             let triple = create_array(
                 nodes,
-                type_ctx.data_type(),
+                list_field.data_type(),
                 data,
                 buffers,
                 dictionaries,
@@ -337,6 +337,19 @@ fn create_primitive_array(
             }
             builder.build()
         }
+        Decimal(_, _) => {
+            // read 3 buffers
+            let mut builder = ArrayData::builder(data_type.clone())
+                .len(length)
+                .buffers(buffers[1..2].to_vec())
+                .offset(0);
+            if null_count > 0 {
+                builder = builder
+                    .null_count(null_count)
+                    .null_bit_buffer(buffers[0].clone())
+            }
+            builder.build()
+        }
         t => panic!("Data type {:?} either unsupported or not primitive", t),
     };
 
@@ -463,7 +476,6 @@ pub fn read_record_batch(
 fn read_dictionary(
     buf: &[u8],
     batch: ipc::DictionaryBatch,
-    ipc_schema: &ipc::Schema,
     schema: &Schema,
     dictionaries_by_field: &mut [Option<ArrayRef>],
 ) -> Result<()> {
@@ -474,15 +486,15 @@ fn read_dictionary(
     }
 
     let id = batch.id();
-
-    // As the dictionary batch does not contain the type of the
-    // values array, we need to retrieve this from the schema.
-    let first_field = find_dictionary_field(ipc_schema, id).ok_or_else(|| {
+    let fields_using_this_dictionary = schema.fields_with_dict_id(id);
+    let first_field = fields_using_this_dictionary.first().ok_or_else(|| {
         ArrowError::InvalidArgumentError("dictionary id not found in schema".to_string())
     })?;
 
+    // As the dictionary batch does not contain the type of the
+    // values array, we need to retrieve this from the schema.
     // Get an array representing this dictionary's values.
-    let dictionary_values: ArrayRef = match schema.field(first_field).data_type() {
+    let dictionary_values: ArrayRef = match first_field.data_type() {
         DataType::Dictionary(_, ref value_type) => {
             // Make a fake schema for the dictionary batch.
             let schema = Schema {
@@ -508,31 +520,14 @@ fn read_dictionary(
     // in the reader. Note that a dictionary batch may be shared between many fields.
     // We don't currently record the isOrdered field. This could be general
     // attributes of arrays.
-    let fields = ipc_schema.fields().unwrap();
-    for (i, field) in fields.iter().enumerate() {
-        if let Some(dictionary) = field.dictionary() {
-            if dictionary.id() == id {
-                // Add (possibly multiple) array refs to the dictionaries array.
-                dictionaries_by_field[i] = Some(dictionary_values.clone());
-            }
+    for (i, field) in schema.fields().iter().enumerate() {
+        if field.dict_id() == Some(id) {
+            // Add (possibly multiple) array refs to the dictionaries array.
+            dictionaries_by_field[i] = Some(dictionary_values.clone());
         }
     }
 
     Ok(())
-}
-
-// Linear search for the first dictionary field with a dictionary id.
-fn find_dictionary_field(ipc_schema: &ipc::Schema, id: i64) -> Option<usize> {
-    let fields = ipc_schema.fields().unwrap();
-    for i in 0..fields.len() {
-        let field: ipc::Field = fields.get(i);
-        if let Some(dictionary) = field.dictionary() {
-            if dictionary.id() == id {
-                return Some(i);
-            }
-        }
-    }
-    None
 }
 
 /// Arrow File reader
@@ -639,13 +634,7 @@ impl<R: Read + Seek> FileReader<R> {
                     ))?;
                     reader.read_exact(&mut buf)?;
 
-                    read_dictionary(
-                        &buf,
-                        batch,
-                        &ipc_schema,
-                        &schema,
-                        &mut dictionaries_by_field,
-                    )?;
+                    read_dictionary(&buf, batch, &schema, &mut dictionaries_by_field)?;
                 }
                 t => {
                     return Err(ArrowError::IoError(format!(
@@ -781,11 +770,6 @@ pub struct StreamReader<R: Read> {
     /// The schema that is read from the stream's first message
     schema: SchemaRef,
 
-    /// The bytes of the IPC schema that is read from the stream's first message
-    ///
-    /// This is kept in order to interpret dictionary data
-    ipc_schema: Vec<u8>,
-
     /// Optional dictionaries for each schema field.
     ///
     /// Dictionaries may be appended to in the streaming format.
@@ -833,7 +817,6 @@ impl<R: Read> StreamReader<R> {
         Ok(Self {
             reader,
             schema: Arc::new(schema),
-            ipc_schema: meta_buffer,
             finished: false,
             dictionaries_by_field,
         })
@@ -918,15 +901,8 @@ impl<R: Read> StreamReader<R> {
                 let mut buf = vec![0; message.bodyLength() as usize];
                 self.reader.read_exact(&mut buf)?;
 
-                let ipc_schema = ipc::get_root_as_message(&self.ipc_schema).header_as_schema()
-                .ok_or_else(|| {
-                    ArrowError::IoError(
-                        "Unable to read schema from stored message header".to_string(),
-                    )
-                })?;
-
                 read_dictionary(
-                    &buf, batch, &ipc_schema, &self.schema, &mut self.dictionaries_by_field
+                    &buf, batch, &self.schema, &mut self.dictionaries_by_field
                 )?;
 
                 // read the next message until we encounter a RecordBatch
@@ -978,6 +954,7 @@ mod tests {
             "generated_primitive_no_batches",
             "generated_primitive_zerolength",
             "generated_primitive",
+            "generated_decimal",
         ];
         paths.iter().for_each(|path| {
             let file = File::open(format!(
@@ -995,6 +972,42 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "Big Endian is not supported for Decimal!")]
+    fn read_decimal_be_file_should_panic() {
+        let testdata = env::var("ARROW_TEST_DATA").expect("ARROW_TEST_DATA not defined");
+        let file = File::open(format!(
+                "{}/arrow-ipc-stream/integration/1.0.0-bigendian/generated_decimal.arrow_file",
+                testdata
+            ))
+            .unwrap();
+        FileReader::try_new(file).unwrap();
+    }
+
+    #[test]
+    fn read_generated_be_files_should_work() {
+        // complementary to the previous test
+        let testdata = env::var("ARROW_TEST_DATA").expect("ARROW_TEST_DATA not defined");
+        let paths = vec![
+            "generated_interval",
+            "generated_datetime",
+            "generated_dictionary",
+            "generated_nested",
+            "generated_primitive_no_batches",
+            "generated_primitive_zerolength",
+            "generated_primitive",
+        ];
+        paths.iter().for_each(|path| {
+            let file = File::open(format!(
+                "{}/arrow-ipc-stream/integration/1.0.0-bigendian/{}.arrow_file",
+                testdata, path
+            ))
+            .unwrap();
+
+            FileReader::try_new(file).unwrap();
+        });
+    }
+
+    #[test]
     fn read_generated_streams() {
         let testdata = env::var("ARROW_TEST_DATA").expect("ARROW_TEST_DATA not defined");
         // the test is repetitive, thus we can read all supported files at once
@@ -1006,6 +1019,7 @@ mod tests {
             "generated_primitive_no_batches",
             "generated_primitive_zerolength",
             "generated_primitive",
+            "generated_decimal",
         ];
         paths.iter().for_each(|path| {
             let file = File::open(format!(

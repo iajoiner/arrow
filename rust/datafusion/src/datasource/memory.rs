@@ -19,11 +19,13 @@
 //! queried by DataFusion. This allows data to be pre-loaded into memory and then
 //! repeatedly queried without incurring additional file I/O overhead.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 
+use crate::datasource::datasource::Statistics;
 use crate::datasource::TableProvider;
 use crate::error::{DataFusionError, Result};
 use crate::physical_plan::common;
@@ -34,19 +36,28 @@ use crate::physical_plan::ExecutionPlan;
 pub struct MemTable {
     schema: SchemaRef,
     batches: Vec<Vec<RecordBatch>>,
+    statistics: Statistics,
 }
 
 impl MemTable {
     /// Create a new in-memory table from the provided schema and record batches
-    pub fn new(schema: SchemaRef, partitions: Vec<Vec<RecordBatch>>) -> Result<Self> {
-        if partitions.iter().all(|partition| {
-            partition
+    pub fn try_new(schema: SchemaRef, partitions: Vec<Vec<RecordBatch>>) -> Result<Self> {
+        if partitions
+            .iter()
+            .flatten()
+            .all(|batches| batches.schema() == schema)
+        {
+            let num_rows: usize = partitions
                 .iter()
-                .all(|batches| batches.schema().as_ref() == schema.as_ref())
-        }) {
+                .flat_map(|batches| batches.iter().map(RecordBatch::num_rows))
+                .sum();
             Ok(Self {
                 schema,
                 batches: partitions,
+                statistics: Statistics {
+                    num_rows: Some(num_rows),
+                    total_byte_size: None,
+                },
             })
         } else {
             Err(DataFusionError::Plan(
@@ -80,11 +91,15 @@ impl MemTable {
             data.push(result);
         }
 
-        MemTable::new(schema.clone(), data)
+        MemTable::try_new(schema.clone(), data)
     }
 }
 
 impl TableProvider for MemTable {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -127,6 +142,10 @@ impl TableProvider for MemTable {
             projection.clone(),
         )?))
     }
+
+    fn statistics(&self) -> Statistics {
+        self.statistics.clone()
+    }
 }
 
 #[cfg(test)]
@@ -153,7 +172,9 @@ mod tests {
             ],
         )?;
 
-        let provider = MemTable::new(schema, vec![vec![batch]])?;
+        let provider = MemTable::try_new(schema, vec![vec![batch]])?;
+
+        assert_eq!(provider.statistics().num_rows, Some(3));
 
         // scan with projection
         let exec = provider.scan(&Some(vec![2, 1]), 1024)?;
@@ -184,7 +205,7 @@ mod tests {
             ],
         )?;
 
-        let provider = MemTable::new(schema, vec![vec![batch]])?;
+        let provider = MemTable::try_new(schema, vec![vec![batch]])?;
 
         let exec = provider.scan(&None, 1024)?;
         let mut it = exec.execute(0).await?;
@@ -212,7 +233,7 @@ mod tests {
             ],
         )?;
 
-        let provider = MemTable::new(schema, vec![vec![batch]])?;
+        let provider = MemTable::try_new(schema, vec![vec![batch]])?;
 
         let projection: Vec<usize> = vec![0, 4];
 
@@ -220,7 +241,7 @@ mod tests {
             Err(DataFusionError::Internal(e)) => {
                 assert_eq!("\"Projection index out of range\"", format!("{:?}", e))
             }
-            _ => assert!(false, "Scan should failed on invalid projection"),
+            _ => panic!("Scan should failed on invalid projection"),
         };
 
         Ok(())
@@ -249,15 +270,12 @@ mod tests {
             ],
         )?;
 
-        match MemTable::new(schema2, vec![vec![batch]]) {
+        match MemTable::try_new(schema2, vec![vec![batch]]) {
             Err(DataFusionError::Plan(e)) => assert_eq!(
                 "\"Mismatch between schema and batches\"",
                 format!("{:?}", e)
             ),
-            _ => assert!(
-                false,
-                "MemTable::new should have failed due to schema mismatch"
-            ),
+            _ => panic!("MemTable::new should have failed due to schema mismatch"),
         }
 
         Ok(())

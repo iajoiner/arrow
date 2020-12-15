@@ -34,9 +34,11 @@
 //! ```
 
 use arrow::datatypes::SchemaRef;
+use std::any::Any;
 use std::string::String;
 use std::sync::Arc;
 
+use crate::datasource::datasource::Statistics;
 use crate::datasource::TableProvider;
 use crate::error::{DataFusionError, Result};
 use crate::physical_plan::csv::CsvExec;
@@ -51,6 +53,7 @@ pub struct CsvFile {
     has_header: bool,
     delimiter: u8,
     file_extension: String,
+    statistics: Statistics,
 }
 
 impl CsvFile {
@@ -74,11 +77,16 @@ impl CsvFile {
             has_header: options.has_header,
             delimiter: options.delimiter,
             file_extension: String::from(options.file_extension),
+            statistics: Statistics::default(),
         })
     }
 }
 
 impl TableProvider for CsvFile {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -98,5 +106,9 @@ impl TableProvider for CsvFile {
             projection.clone(),
             batch_size,
         )?))
+    }
+
+    fn statistics(&self) -> Statistics {
+        self.statistics.clone()
     }
 }

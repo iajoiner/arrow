@@ -1467,6 +1467,8 @@ class TestConvertDateTimeLikeTypes:
         expected = pd.Series([None, date(1991, 1, 1), None])
         assert pa.Array.from_pandas(expected).equals(result)
 
+    @pytest.mark.skipif('1.16.0' <= LooseVersion(np.__version__) < '1.16.1',
+                        reason='Until numpy/numpy#12745 is resolved')
     def test_fixed_offset_timezone(self):
         df = pd.DataFrame({
             'a': [
@@ -2521,10 +2523,10 @@ class TestConvertMisc:
         (np.float64, pa.float64()),
         # XXX unsupported
         # (np.dtype([('a', 'i2')]), pa.struct([pa.field('a', pa.int16())])),
-        (np.object, pa.string()),
-        (np.object, pa.binary()),
-        (np.object, pa.binary(10)),
-        (np.object, pa.list_(pa.int64())),
+        (np.object_, pa.string()),
+        (np.object_, pa.binary()),
+        (np.object_, pa.binary(10)),
+        (np.object_, pa.list_(pa.int64())),
     ]
 
     def test_all_none_objects(self):
@@ -2830,7 +2832,7 @@ def _check_serialize_components_roundtrip(pd_obj):
         tm.assert_series_equal(pd_obj, deserialized)
 
 
-@pytest.mark.skipif(LooseVersion(np.__version__) >= '0.16',
+@pytest.mark.skipif('1.16.0' <= LooseVersion(np.__version__) < '1.16.1',
                     reason='Until numpy/numpy#12745 is resolved')
 def test_serialize_deserialize_pandas():
     # ARROW-1784, serialize and deserialize DataFrame by decomposing
@@ -4220,8 +4222,7 @@ def test_metadata_compat_missing_field_name():
 
         )})
     result = table.to_pandas()
-    # on python 3.5 the column order can differ -> adding check_like=True
-    tm.assert_frame_equal(result, expected, check_like=True)
+    tm.assert_frame_equal(result, expected)
 
 
 def test_metadata_index_name_not_json_serializable():

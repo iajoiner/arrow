@@ -20,8 +20,9 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
 
-use datafusion::datasource::TableProvider;
+use datafusion::datasource::datasource::Statistics;
 use datafusion::error::{DataFusionError, Result};
+use datafusion::{datasource::TableProvider, physical_plan::collect};
 
 use datafusion::execution::context::ExecutionContext;
 use datafusion::logical_plan::{col, LogicalPlan, LogicalPlanBuilder};
@@ -128,11 +129,14 @@ impl ExecutionPlan for CustomExecutionPlan {
 }
 
 impl TableProvider for CustomTableProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn schema(&self) -> SchemaRef {
         TEST_CUSTOM_SCHEMA_REF!()
     }
 
-    /// Create an ExecutionPlan that will scan the table.
     fn scan(
         &self,
         projection: &Option<Vec<usize>>,
@@ -141,6 +145,10 @@ impl TableProvider for CustomTableProvider {
         Ok(Arc::new(CustomExecutionPlan {
             projection: projection.clone(),
         }))
+    }
+
+    fn statistics(&self) -> Statistics {
+        Statistics::default()
     }
 }
 
@@ -178,7 +186,7 @@ async fn custom_source_dataframe() -> Result<()> {
     assert_eq!(1, physical_plan.schema().fields().len());
     assert_eq!("c2", physical_plan.schema().field(0).name().as_str());
 
-    let batches = ctx.collect(physical_plan).await?;
+    let batches = collect(physical_plan).await?;
     let origin_rec_batch = TEST_CUSTOM_RECORD_BATCH!()?;
     assert_eq!(1, batches.len());
     assert_eq!(1, batches[0].num_columns());

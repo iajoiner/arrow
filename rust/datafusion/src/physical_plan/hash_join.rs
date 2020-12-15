@@ -18,31 +18,34 @@
 //! Defines the join plan for executing partitions in parallel and then joining the results
 //! into a set of partitions.
 
+use arrow::array::ArrayRef;
 use std::sync::Arc;
-use std::{
-    any::Any,
-    collections::{HashMap, HashSet},
-};
+use std::{any::Any, collections::HashSet};
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
+use hashbrown::HashMap;
 
 use arrow::array::{make_array, Array, MutableArrayData};
+use arrow::datatypes::DataType;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
 
-use super::{expressions::col, hash_aggregate::create_key};
+use arrow::array::{
+    Int16Array, Int32Array, Int64Array, Int8Array, StringArray, UInt16Array, UInt32Array,
+    UInt64Array, UInt8Array,
+};
+
+use super::expressions::col;
 use super::{
     hash_utils::{build_join_schema, check_join_is_valid, JoinOn, JoinType},
     merge::MergeExec,
 };
 use crate::error::{DataFusionError, Result};
 
-use super::{
-    group_scalar::GroupByScalar, ExecutionPlan, Partitioning, RecordBatchStream,
-    SendableRecordBatchStream,
-};
+use super::{ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream};
+use ahash::RandomState;
 
 // An index of (batch, row) uniquely identifying a row in a part.
 type Index = (usize, usize);
@@ -53,7 +56,7 @@ type JoinIndex = Option<(usize, usize)>;
 // Maps ["on" value] -> [list of indices with this key's value]
 // E.g. [1, 2] -> [(0, 3), (1, 6), (0, 8)] indicates that (column1, column2) = [1, 2] is true
 // for rows 3 and 8 from batch 0 and row 6 from batch 1.
-type JoinHashMap = HashMap<Vec<GroupByScalar>, Vec<Index>>;
+type JoinHashMap = HashMap<Vec<u8>, Vec<Index>, RandomState>;
 type JoinLeftData = (JoinHashMap, Vec<RecordBatch>);
 
 /// join execution plan executes partitions in parallel and combines them into a set of
@@ -165,7 +168,7 @@ impl ExecutionPlan for HashJoinExec {
         // This operation performs 2 steps at once:
         // 1. creates a [JoinHashMap] of all batches from the stream
         // 2. stores the batches in a vector.
-        let initial = (JoinHashMap::new(), Vec::new(), 0);
+        let initial = (JoinHashMap::default(), Vec::new(), 0);
         let left_data = stream
             .try_fold(initial, |mut acc, batch| async {
                 let hash = &mut acc.0;
@@ -206,19 +209,15 @@ fn update_hash(
         .collect::<Result<Vec<_>>>()?;
 
     let mut key = Vec::with_capacity(keys_values.len());
-    for _ in 0..keys_values.len() {
-        key.push(GroupByScalar::UInt32(0));
-    }
 
     // update the hash map
     for row in 0..batch.num_rows() {
         create_key(&keys_values, row, &mut key)?;
-        match hash.get_mut(&key) {
-            Some(v) => v.push((index, row)),
-            None => {
-                hash.insert(key.clone(), vec![(index, row)]);
-            }
-        };
+
+        hash.raw_entry_mut()
+            .from_key(&key)
+            .and_modify(|_, v| v.push((index, row)))
+            .or_insert_with(|| (key.clone(), vec![(index, row)]));
     }
     Ok(())
 }
@@ -252,6 +251,7 @@ fn build_batch_from_indices(
     schema: &Schema,
     left: &Vec<RecordBatch>,
     right: &RecordBatch,
+    join_type: &JoinType,
     indices: &[(JoinIndex, JoinIndex)],
 ) -> ArrowResult<RecordBatch> {
     if left.is_empty() {
@@ -260,6 +260,11 @@ fn build_batch_from_indices(
     // this is just for symmetry of the code below.
     let right = vec![right.clone()];
 
+    let (primary_is_left, primary, secondary) = match join_type {
+        JoinType::Inner | JoinType::Left => (true, left, &right),
+        JoinType::Right => (false, &right, left),
+    };
+
     // build the columns of the new [RecordBatch]:
     // 1. pick whether the column is from the left or right
     // 2. based on the pick, `take` items from the different recordBatches
@@ -267,11 +272,11 @@ fn build_batch_from_indices(
     for field in schema.fields() {
         // pick the column (left or right) based on the field name.
         // Note that we take `.data()` to gather the [ArrayData] of each array.
-        let (is_left, arrays) = match left[0].schema().index_of(field.name()) {
-            Ok(i) => Ok((true, left.iter().map(|batch| batch.column(i).data()).collect::<Vec<_>>())),
+        let (is_primary, arrays) = match primary[0].schema().index_of(field.name()) {
+            Ok(i) => Ok((true, primary.iter().map(|batch| batch.column(i).data()).collect::<Vec<_>>())),
             Err(_) => {
-                match right[0].schema().index_of(field.name()) {
-                    Ok(i) => Ok((false, right.iter().map(|batch| batch.column(i).data()).collect::<Vec<_>>())),
+                match secondary[0].schema().index_of(field.name()) {
+                    Ok(i) => Ok((false, secondary.iter().map(|batch| batch.column(i).data()).collect::<Vec<_>>())),
                     _ => Err(DataFusionError::Internal(
                         format!("During execution, the column {} was not found in neither the left or right side of the join", field.name()).to_string()
                     ))
@@ -285,32 +290,92 @@ fn build_batch_from_indices(
             .map(|array| array.as_ref())
             .collect::<Vec<_>>();
         let capacity = arrays.iter().map(|array| array.len()).sum();
-        let mut mutable = MutableArrayData::new(arrays, capacity);
+        let mut mutable = MutableArrayData::new(arrays, true, capacity);
 
-        let array = if is_left {
-            // build the array using the left
+        let is_left =
+            (is_primary && primary_is_left) || (!is_primary && !primary_is_left);
+        if is_left {
+            // use the left indices
             for (join_index, _) in indices {
                 match join_index {
                     Some((batch, row)) => mutable.extend(*batch, *row, *row + 1),
-                    // something like `mutable.extend_nulls(*row, *row + 1)`
-                    None => unimplemented!(),
+                    None => mutable.extend_nulls(1),
                 }
             }
-            make_array(Arc::new(mutable.freeze()))
         } else {
-            // build the array using the right
+            // use the right indices
             for (_, join_index) in indices {
                 match join_index {
                     Some((batch, row)) => mutable.extend(*batch, *row, *row + 1),
-                    // something like `mutable.extend_nulls(*row, *row + 1)`
-                    None => unimplemented!(),
+                    None => mutable.extend_nulls(1),
                 }
             }
-            make_array(Arc::new(mutable.freeze()))
         };
+        let array = make_array(Arc::new(mutable.freeze()));
         columns.push(array);
     }
     Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
+}
+
+/// Create a key `Vec<u8>` that is used as key for the hashmap
+pub(crate) fn create_key(
+    group_by_keys: &[ArrayRef],
+    row: usize,
+    vec: &mut Vec<u8>,
+) -> Result<()> {
+    vec.clear();
+    for i in 0..group_by_keys.len() {
+        let col = &group_by_keys[i];
+        match col.data_type() {
+            DataType::UInt8 => {
+                let array = col.as_any().downcast_ref::<UInt8Array>().unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
+            DataType::UInt16 => {
+                let array = col.as_any().downcast_ref::<UInt16Array>().unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
+            DataType::UInt32 => {
+                let array = col.as_any().downcast_ref::<UInt32Array>().unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
+            DataType::UInt64 => {
+                let array = col.as_any().downcast_ref::<UInt64Array>().unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
+            DataType::Int8 => {
+                let array = col.as_any().downcast_ref::<Int8Array>().unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
+            DataType::Int16 => {
+                let array = col.as_any().downcast_ref::<Int16Array>().unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
+            DataType::Int32 => {
+                let array = col.as_any().downcast_ref::<Int32Array>().unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
+            DataType::Int64 => {
+                let array = col.as_any().downcast_ref::<Int64Array>().unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
+            DataType::Utf8 => {
+                let array = col.as_any().downcast_ref::<StringArray>().unwrap();
+                let value = array.value(row);
+                // store the size
+                vec.extend(value.len().to_le_bytes().iter());
+                // store the string value
+                vec.extend(array.value(row).as_bytes().iter());
+            }
+            _ => {
+                // This is internal because we should have caught this before.
+                return Err(DataFusionError::Internal(
+                    "Unsupported GROUP BY data type".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_batch(
@@ -320,12 +385,13 @@ fn build_batch(
     join_type: &JoinType,
     schema: &Schema,
 ) -> ArrowResult<RecordBatch> {
-    let mut right_hash = JoinHashMap::with_capacity(batch.num_rows());
+    let mut right_hash =
+        JoinHashMap::with_capacity_and_hasher(batch.num_rows(), RandomState::new());
     update_hash(on_right, batch, &mut right_hash, 0).unwrap();
 
     let indices = build_join_indexes(&left_data.0, &right_hash, join_type).unwrap();
 
-    build_batch_from_indices(schema, &left_data.1, &batch, &indices)
+    build_batch_from_indices(schema, &left_data.1, &batch, join_type, &indices)
 }
 
 /// returns a vector with (index from left, index from right).
@@ -364,8 +430,8 @@ fn build_join_indexes(
         JoinType::Inner => {
             // inner => key intersection
             // unfortunately rust does not support intersection of map keys :(
-            let left_set: HashSet<Vec<GroupByScalar>> = left.keys().cloned().collect();
-            let left_right: HashSet<Vec<GroupByScalar>> = right.keys().cloned().collect();
+            let left_set: HashSet<Vec<u8>> = left.keys().cloned().collect();
+            let left_right: HashSet<Vec<u8>> = right.keys().cloned().collect();
             let inner = left_set.intersection(&left_right);
 
             let mut indexes = Vec::new(); // unknown a prior size
@@ -381,6 +447,48 @@ fn build_join_indexes(
                         indexes.push((Some(*x), Some(*y)));
                     })
                 })
+            }
+            Ok(indexes)
+        }
+        JoinType::Left => {
+            // left => left keys
+            let mut indexes = Vec::new(); // unknown a prior size
+            for (key, left_indexes) in left {
+                // for every item on the left and right with this key, add the respective pair
+                if let Some(right_indexes) = right.get(key) {
+                    left_indexes.iter().for_each(|x| {
+                        right_indexes.iter().for_each(|y| {
+                            // on an inner join, left and right indices are present
+                            indexes.push((Some(*x), Some(*y)));
+                        })
+                    })
+                } else {
+                    // key not on the right => push Nones
+                    left_indexes.iter().for_each(|x| {
+                        indexes.push((Some(*x), None));
+                    })
+                }
+            }
+            Ok(indexes)
+        }
+        JoinType::Right => {
+            // right => right keys
+            let mut indexes = Vec::new(); // unknown a prior size
+            for (key, right_indexes) in right {
+                // for every item on the left and right with this key, add the respective pair
+                if let Some(left_indexes) = left.get(key) {
+                    left_indexes.iter().for_each(|x| {
+                        right_indexes.iter().for_each(|y| {
+                            // on an inner join, left and right indices are present
+                            indexes.push((Some(*x), Some(*y)));
+                        })
+                    })
+                } else {
+                    // key not on the left => push Nones
+                    right_indexes.iter().for_each(|x| {
+                        indexes.push((None, Some(*x)));
+                    })
+                }
             }
             Ok(indexes)
         }
@@ -435,19 +543,20 @@ mod tests {
         left: Arc<dyn ExecutionPlan>,
         right: Arc<dyn ExecutionPlan>,
         on: &[(&str, &str)],
+        join_type: &JoinType,
     ) -> Result<HashJoinExec> {
         let on: Vec<_> = on
             .iter()
             .map(|(l, r)| (l.to_string(), r.to_string()))
             .collect();
-        HashJoinExec::try_new(left, right, &on, &JoinType::Inner)
+        HashJoinExec::try_new(left, right, &on, join_type)
     }
 
     /// Asserts that the rows are the same, taking into account that their order
     /// is irrelevant
     fn assert_same_rows(result: &[String], expected: &[&str]) {
         // convert to set since row order is irrelevant
-        let result = result.iter().map(|s| s.clone()).collect::<HashSet<_>>();
+        let result = result.iter().cloned().collect::<HashSet<_>>();
 
         let expected = expected
             .iter()
@@ -457,7 +566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn join_one() -> Result<()> {
+    async fn join_inner_one() -> Result<()> {
         let left = build_table(
             ("a1", &vec![1, 2, 3]),
             ("b1", &vec![4, 5, 5]), // this has a repetition
@@ -470,7 +579,7 @@ mod tests {
         );
         let on = &[("b1", "b1")];
 
-        let join = join(left, right, on)?;
+        let join = join(left, right, on, &JoinType::Inner)?;
 
         let columns = columns(&join.schema());
         assert_eq!(columns, vec!["a1", "b1", "c1", "a2", "c2"]);
@@ -487,7 +596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn join_one_no_shared_column_names() -> Result<()> {
+    async fn join_inner_one_no_shared_column_names() -> Result<()> {
         let left = build_table(
             ("a1", &vec![1, 2, 3]),
             ("b1", &vec![4, 5, 5]), // this has a repetition
@@ -500,7 +609,7 @@ mod tests {
         );
         let on = &[("b1", "b2")];
 
-        let join = join(left, right, on)?;
+        let join = join(left, right, on, &JoinType::Inner)?;
 
         let columns = columns(&join.schema());
         assert_eq!(columns, vec!["a1", "b1", "c1", "a2", "b2", "c2"]);
@@ -517,7 +626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn join_two() -> Result<()> {
+    async fn join_inner_two() -> Result<()> {
         let left = build_table(
             ("a1", &vec![1, 2, 2]),
             ("b2", &vec![1, 2, 2]),
@@ -530,7 +639,7 @@ mod tests {
         );
         let on = &[("a1", "a1"), ("b2", "b2")];
 
-        let join = join(left, right, on)?;
+        let join = join(left, right, on, &JoinType::Inner)?;
 
         let columns = columns(&join.schema());
         assert_eq!(columns, vec!["a1", "b2", "c1", "c2"]);
@@ -549,7 +658,7 @@ mod tests {
 
     /// Test where the left has 2 parts, the right with 1 part => 1 part
     #[tokio::test]
-    async fn join_one_two_parts_left() -> Result<()> {
+    async fn join_inner_one_two_parts_left() -> Result<()> {
         let batch1 = build_table_i32(
             ("a1", &vec![1, 2]),
             ("b2", &vec![1, 2]),
@@ -569,7 +678,7 @@ mod tests {
         );
         let on = &[("a1", "a1"), ("b2", "b2")];
 
-        let join = join(left, right, on)?;
+        let join = join(left, right, on, &JoinType::Inner)?;
 
         let columns = columns(&join.schema());
         assert_eq!(columns, vec!["a1", "b2", "c1", "c2"]);
@@ -588,7 +697,7 @@ mod tests {
 
     /// Test where the left has 1 part, the right has 2 parts => 2 parts
     #[tokio::test]
-    async fn join_one_two_parts_right() -> Result<()> {
+    async fn join_inner_one_two_parts_right() -> Result<()> {
         let left = build_table(
             ("a1", &vec![1, 2, 3]),
             ("b1", &vec![4, 5, 5]), // this has a repetition
@@ -609,7 +718,7 @@ mod tests {
 
         let on = &[("b1", "b1")];
 
-        let join = join(left, right, on)?;
+        let join = join(left, right, on, &JoinType::Inner)?;
 
         let columns = columns(&join.schema());
         assert_eq!(columns, vec!["a1", "b1", "c1", "a2", "c2"]);
@@ -629,6 +738,66 @@ mod tests {
         assert_eq!(batches.len(), 1);
         let result = format_batch(&batches[0]);
         let expected = vec!["2,5,8,30,90", "3,5,9,30,90"];
+
+        assert_same_rows(&result, &expected);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_left_one() -> Result<()> {
+        let left = build_table(
+            ("a1", &vec![1, 2, 3]),
+            ("b1", &vec![4, 5, 7]), // 7 does not exist on the right
+            ("c1", &vec![7, 8, 9]),
+        );
+        let right = build_table(
+            ("a2", &vec![10, 20, 30]),
+            ("b1", &vec![4, 5, 6]),
+            ("c2", &vec![70, 80, 90]),
+        );
+        let on = &[("b1", "b1")];
+
+        let join = join(left, right, on, &JoinType::Left)?;
+
+        let columns = columns(&join.schema());
+        assert_eq!(columns, vec!["a1", "b1", "c1", "a2", "c2"]);
+
+        let stream = join.execute(0).await?;
+        let batches = common::collect(stream).await?;
+
+        let result = format_batch(&batches[0]);
+        let expected = vec!["1,4,7,10,70", "2,5,8,20,80", "3,7,9,NULL,NULL"];
+
+        assert_same_rows(&result, &expected);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn join_right_one() -> Result<()> {
+        let left = build_table(
+            ("a1", &vec![1, 2, 3]),
+            ("b1", &vec![4, 5, 7]),
+            ("c1", &vec![7, 8, 9]),
+        );
+        let right = build_table(
+            ("a2", &vec![10, 20, 30]),
+            ("b1", &vec![4, 5, 6]), // 6 does not exist on the left
+            ("c2", &vec![70, 80, 90]),
+        );
+        let on = &[("b1", "b1")];
+
+        let join = join(left, right, on, &JoinType::Right)?;
+
+        let columns = columns(&join.schema());
+        assert_eq!(columns, vec!["a1", "c1", "a2", "b1", "c2"]);
+
+        let stream = join.execute(0).await?;
+        let batches = common::collect(stream).await?;
+
+        let result = format_batch(&batches[0]);
+        let expected = vec!["1,7,10,4,70", "2,8,20,5,80", "NULL,NULL,30,6,90"];
 
         assert_same_rows(&result, &expected);
 

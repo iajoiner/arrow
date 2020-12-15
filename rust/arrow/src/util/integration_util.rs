@@ -331,6 +331,10 @@ impl ArrowJsonBatch {
                         let arr = arr.as_any().downcast_ref::<StructArray>().unwrap();
                         arr.equals_json(&json_array.iter().collect::<Vec<&Value>>()[..])
                     }
+                    DataType::Decimal(_, _) => {
+                        let arr = arr.as_any().downcast_ref::<DecimalArray>().unwrap();
+                        arr.equals_json(&json_array.iter().collect::<Vec<&Value>>()[..])
+                    }
                     DataType::Dictionary(ref key_type, _) => match key_type.as_ref() {
                         DataType::Int8 => {
                             let arr = arr
@@ -688,7 +692,11 @@ mod tests {
             Field::new("c3", DataType::Utf8, true),
             Field::new(
                 "c4",
-                DataType::List(Box::new(NullableDataType::new(DataType::Int32, false))),
+                DataType::List(Box::new(Field::new(
+                    "custom_item",
+                    DataType::Int32,
+                    false,
+                ))),
                 true,
             ),
         ]);
@@ -697,10 +705,10 @@ mod tests {
 
     #[test]
     fn test_arrow_data_equality() {
-        let secs_tz = Some(Arc::new("Europe/Budapest".to_string()));
-        let millis_tz = Some(Arc::new("America/New_York".to_string()));
-        let micros_tz = Some(Arc::new("UTC".to_string()));
-        let nanos_tz = Some(Arc::new("Africa/Johannesburg".to_string()));
+        let secs_tz = Some("Europe/Budapest".to_string());
+        let millis_tz = Some("America/New_York".to_string());
+        let micros_tz = Some("UTC".to_string());
+        let nanos_tz = Some("Africa/Johannesburg".to_string());
         let schema = Schema::new(vec![
             Field::new("bools", DataType::Boolean, true),
             Field::new("int8s", DataType::Int8, true),
@@ -758,7 +766,7 @@ mod tests {
             Field::new("utf8s", DataType::Utf8, true),
             Field::new(
                 "lists",
-                DataType::List(Box::new(NullableDataType::new(DataType::Int32, true))),
+                DataType::List(Box::new(Field::new("item", DataType::Int32, true))),
                 true,
             ),
             Field::new(
@@ -835,7 +843,7 @@ mod tests {
         let value_data = Int32Array::from(vec![None, Some(2), None, None]);
         let value_offsets = Buffer::from(&[0, 3, 4, 4].to_byte_slice());
         let list_data_type =
-            DataType::List(Box::new(NullableDataType::new(DataType::Int32, true)));
+            DataType::List(Box::new(Field::new("item", DataType::Int32, true)));
         let list_data = ArrayData::builder(list_data_type)
             .len(3)
             .add_buffer(value_offsets)

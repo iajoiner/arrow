@@ -39,12 +39,11 @@ use crate::physical_plan::datetime_expressions;
 use crate::physical_plan::expressions::{nullif_func, SUPPORTED_NULLIF_TYPES};
 use crate::physical_plan::math_expressions;
 use crate::physical_plan::string_expressions;
-use arrow::datatypes::NullableDataType;
 use arrow::{
     array::ArrayRef,
     compute::kernels::length::length,
     datatypes::TimeUnit,
-    datatypes::{DataType, Schema},
+    datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
 use fmt::{Debug, Formatter};
@@ -181,7 +180,7 @@ pub fn return_type(
     // verify that this is a valid set of data types for this function
     data_types(&arg_types, &signature(fun))?;
 
-    if arg_types.len() == 0 {
+    if arg_types.is_empty() {
         // functions currently cannot be evaluated without arguments, as they can't
         // know the number of rows to return.
         return Err(DataFusionError::Plan(format!(
@@ -208,7 +207,7 @@ pub fn return_type(
             Ok(DataType::Timestamp(TimeUnit::Nanosecond, None))
         }
         BuiltinScalarFunction::Array => Ok(DataType::FixedSizeList(
-            Box::new(NullableDataType::new(arg_types[0].clone(), true)),
+            Box::new(Field::new("item", arg_types[0].clone(), true)),
             arg_types.len() as i32,
         )),
         BuiltinScalarFunction::NullIf => {
@@ -402,7 +401,7 @@ mod tests {
         let result = result.as_any().downcast_ref::<Float64Array>().unwrap();
 
         // value is correct
-        assert_eq!(format!("{}", result.value(0)), expected);
+        assert_eq!(result.value(0).to_string(), expected);
 
         Ok(())
     }
@@ -443,7 +442,7 @@ mod tests {
         let result = result.as_any().downcast_ref::<StringArray>().unwrap();
 
         // value is correct
-        assert_eq!(format!("{}", result.value(0)), expected);
+        assert_eq!(result.value(0).to_string(), expected);
 
         Ok(())
     }
@@ -456,7 +455,7 @@ mod tests {
     #[test]
     fn test_concat_error() -> Result<()> {
         let result = return_type(&BuiltinScalarFunction::Concat, &vec![]);
-        if let Ok(_) = result {
+        if result.is_ok() {
             Err(DataFusionError::Plan(
                 "Function 'concat' cannot accept zero arguments".to_string(),
             ))
@@ -485,10 +484,7 @@ mod tests {
         assert_eq!(
             expr.data_type(&schema)?,
             // type equals to a common coercion
-            DataType::FixedSizeList(
-                Box::new(NullableDataType::new(expected_type, true)),
-                2
-            )
+            DataType::FixedSizeList(Box::new(Field::new("item", expected_type, true)), 2)
         );
 
         // evaluate works

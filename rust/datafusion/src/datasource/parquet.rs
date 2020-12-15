@@ -17,11 +17,13 @@
 
 //! Parquet data source
 
+use std::any::Any;
 use std::string::String;
 use std::sync::Arc;
 
 use arrow::datatypes::*;
 
+use crate::datasource::datasource::Statistics;
 use crate::datasource::TableProvider;
 use crate::error::Result;
 use crate::physical_plan::parquet::ParquetExec;
@@ -31,6 +33,7 @@ use crate::physical_plan::ExecutionPlan;
 pub struct ParquetTable {
     path: String,
     schema: SchemaRef,
+    statistics: Statistics,
 }
 
 impl ParquetTable {
@@ -41,11 +44,16 @@ impl ParquetTable {
         Ok(Self {
             path: path.to_string(),
             schema,
+            statistics: Statistics::default(),
         })
     }
 }
 
 impl TableProvider for ParquetTable {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     /// Get the schema for this parquet file.
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
@@ -63,6 +71,10 @@ impl TableProvider for ParquetTable {
             projection.clone(),
             batch_size,
         )?))
+    }
+
+    fn statistics(&self) -> Statistics {
+        self.statistics.clone()
     }
 }
 

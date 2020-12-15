@@ -22,7 +22,8 @@ use std::sync::Arc;
 
 use crate::logical_plan::Expr::Alias;
 use crate::logical_plan::{
-    lit, Expr, LogicalPlan, LogicalPlanBuilder, Operator, PlanType, StringifiedPlan,
+    and, lit, DFSchema, Expr, LogicalPlan, LogicalPlanBuilder, Operator, PlanType,
+    StringifiedPlan, ToDFSchema,
 };
 use crate::scalar::ScalarValue;
 use crate::{
@@ -137,10 +138,10 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
             FileType::NdJson => {}
         };
 
-        let schema = SchemaRef::new(self.build_schema(&columns)?);
+        let schema = self.build_schema(&columns)?;
 
         Ok(LogicalPlan::CreateExternalTable {
-            schema,
+            schema: schema.to_dfschema_ref()?,
             name: name.clone(),
             location: location.clone(),
             file_type: file_type.clone(),
@@ -169,7 +170,7 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
             verbose,
             plan,
             stringified_plans,
-            schema,
+            schema: schema.to_dfschema_ref()?,
         })
     }
 
@@ -201,7 +202,7 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
             SQLDataType::Float(_) => Ok(DataType::Float32),
             SQLDataType::Real | SQLDataType::Double => Ok(DataType::Float64),
             SQLDataType::Boolean => Ok(DataType::Boolean),
-            SQLDataType::Date => Ok(DataType::Date64(DateUnit::Day)),
+            SQLDataType::Date => Ok(DataType::Date32(DateUnit::Day)),
             SQLDataType::Time => Ok(DataType::Time64(TimeUnit::Millisecond)),
             SQLDataType::Timestamp => Ok(DataType::Date64(DateUnit::Millisecond)),
             _ => Err(DataFusionError::NotImplemented(format!(
@@ -211,18 +212,13 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
         }
     }
 
-    fn plan_tables_with_joins(&self, from: &Vec<TableWithJoins>) -> Result<LogicalPlan> {
+    fn plan_from_tables(&self, from: &Vec<TableWithJoins>) -> Result<Vec<LogicalPlan>> {
         match from.len() {
-            0 => Ok(LogicalPlanBuilder::empty(true).build()?),
-            1 => self.plan_table_with_joins(&from[0]),
-            _ => {
-                // https://issues.apache.org/jira/browse/ARROW-10729
-                Err(DataFusionError::NotImplemented(
-                    "JOINS are only supported when using the explicit JOIN ON syntax \
-                    (https://issues.apache.org/jira/browse/ARROW-10729)"
-                        .to_string(),
-                ))
-            }
+            0 => Ok(vec![LogicalPlanBuilder::empty(true).build()?]),
+            _ => from
+                .iter()
+                .map(|t| self.plan_table_with_joins(t))
+                .collect::<Result<Vec<_>>>(),
         }
     }
 
@@ -247,46 +243,61 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
     ) -> Result<LogicalPlan> {
         let right = self.create_relation(&join.relation)?;
         match &join.join_operator {
+            JoinOperator::LeftOuter(constraint) => {
+                self.parse_join(left, &right, constraint, JoinType::Left)
+            }
+            JoinOperator::RightOuter(constraint) => {
+                self.parse_join(left, &right, constraint, JoinType::Right)
+            }
             JoinOperator::Inner(constraint) => {
-                match constraint {
-                    JoinConstraint::On(sql_expr) => {
-                        let mut keys: Vec<(String, String)> = vec![];
-                        let join_schema =
-                            create_join_schema(left.schema(), &right.schema())?;
-
-                        // parse ON expression
-                        let expr = self.sql_to_rex(sql_expr, &join_schema)?;
-
-                        // extract join keys
-                        extract_join_keys(&expr, &mut keys)?;
-                        let left_keys: Vec<&str> =
-                            keys.iter().map(|pair| pair.0.as_str()).collect();
-                        let right_keys: Vec<&str> =
-                            keys.iter().map(|pair| pair.1.as_str()).collect();
-
-                        // return the logical plan representing the join
-                        LogicalPlanBuilder::from(&left)
-                            .join(&right, JoinType::Inner, &left_keys, &right_keys)?
-                            .build()
-                    }
-                    JoinConstraint::Using(_) => {
-                        // https://issues.apache.org/jira/browse/ARROW-10728
-                        Err(DataFusionError::NotImplemented(
-                            "JOIN with USING is not supported (https://issues.apache.org/jira/browse/ARROW-10728)".to_string(),
-                        ))
-                    }
-                    JoinConstraint::Natural => {
-                        // https://issues.apache.org/jira/browse/ARROW-10727
-                        Err(DataFusionError::NotImplemented(
-                            "NATURAL JOIN is not supported (https://issues.apache.org/jira/browse/ARROW-10727)".to_string(),
-                        ))
-                    }
-                }
+                self.parse_join(left, &right, constraint, JoinType::Inner)
             }
             other => Err(DataFusionError::NotImplemented(format!(
                 "Unsupported JOIN operator {:?}",
                 other
             ))),
+        }
+    }
+
+    fn parse_join(
+        &self,
+        left: &LogicalPlan,
+        right: &LogicalPlan,
+        constraint: &JoinConstraint,
+        join_type: JoinType,
+    ) -> Result<LogicalPlan> {
+        match constraint {
+            JoinConstraint::On(sql_expr) => {
+                let mut keys: Vec<(String, String)> = vec![];
+                let join_schema = left.schema().join(&right.schema())?;
+
+                // parse ON expression
+                let expr = self.sql_to_rex(sql_expr, &join_schema)?;
+
+                // extract join keys
+                extract_join_keys(&expr, &mut keys)?;
+                let left_keys: Vec<&str> =
+                    keys.iter().map(|pair| pair.0.as_str()).collect();
+                let right_keys: Vec<&str> =
+                    keys.iter().map(|pair| pair.1.as_str()).collect();
+
+                // return the logical plan representing the join
+                LogicalPlanBuilder::from(&left)
+                    .join(&right, join_type, &left_keys, &right_keys)?
+                    .build()
+            }
+            JoinConstraint::Using(idents) => {
+                let keys: Vec<&str> = idents.iter().map(|x| x.value.as_str()).collect();
+                LogicalPlanBuilder::from(&left)
+                    .join(&right, join_type, &keys, &keys)?
+                    .build()
+            }
+            JoinConstraint::Natural => {
+                // https://issues.apache.org/jira/browse/ARROW-10727
+                Err(DataFusionError::NotImplemented(
+                    "NATURAL JOIN is not supported (https://issues.apache.org/jira/browse/ARROW-10727)".to_string(),
+                ))
+            }
         }
     }
 
@@ -323,10 +334,77 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
             ));
         }
 
-        let plan = self.plan_tables_with_joins(&select.from)?;
+        let plans = self.plan_from_tables(&select.from)?;
 
-        // filter (also known as selection) first
-        let plan = self.filter(&plan, &select.selection)?;
+        let plan = match &select.selection {
+            Some(predicate_expr) => {
+                // build join schema
+                let mut fields = vec![];
+                for plan in &plans {
+                    fields.extend_from_slice(&plan.schema().fields());
+                }
+                let join_schema = DFSchema::new(fields)?;
+
+                let filter_expr = self.sql_to_rex(predicate_expr, &join_schema)?;
+
+                // look for expressions of the form `<column> = <column>`
+                let mut possible_join_keys = vec![];
+                extract_possible_join_keys(&filter_expr, &mut possible_join_keys)?;
+
+                let mut all_join_keys = vec![];
+                let mut left = plans[0].clone();
+                for i in 1..plans.len() {
+                    let right = &plans[i];
+                    let left_schema = left.schema();
+                    let right_schema = right.schema();
+                    let mut join_keys = vec![];
+                    for (l, r) in &possible_join_keys {
+                        if left_schema.field_with_unqualified_name(l).is_ok()
+                            && right_schema.field_with_unqualified_name(r).is_ok()
+                        {
+                            join_keys.push((l.as_str(), r.as_str()));
+                        } else if left_schema.field_with_unqualified_name(r).is_ok()
+                            && right_schema.field_with_unqualified_name(l).is_ok()
+                        {
+                            join_keys.push((r.as_str(), l.as_str()));
+                        }
+                    }
+                    if join_keys.is_empty() {
+                        return Err(DataFusionError::NotImplemented(
+                            "Cartesian joins are not supported".to_string(),
+                        ));
+                    } else {
+                        let left_keys: Vec<_> =
+                            join_keys.iter().map(|(l, _)| *l).collect();
+                        let right_keys: Vec<_> =
+                            join_keys.iter().map(|(_, r)| *r).collect();
+                        let builder = LogicalPlanBuilder::from(&left);
+                        left = builder
+                            .join(right, JoinType::Inner, &left_keys, &right_keys)?
+                            .build()?;
+                    }
+                    all_join_keys.extend_from_slice(&join_keys);
+                }
+
+                // remove join expressions from filter
+                match remove_join_expressions(&filter_expr, &all_join_keys)? {
+                    Some(filter_expr) => {
+                        LogicalPlanBuilder::from(&left).filter(filter_expr)?.build()
+                    }
+                    _ => Ok(left),
+                }
+            }
+            None => {
+                if plans.len() == 1 {
+                    Ok(plans[0].clone())
+                } else {
+                    Err(DataFusionError::NotImplemented(
+                        "Cartesian joins are not supported".to_string(),
+                    ))
+                }
+            }
+        };
+        let plan = plan?;
 
         let projection_expr: Vec<Expr> = select
             .projection
@@ -337,30 +415,16 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
         let aggr_expr: Vec<Expr> = projection_expr
             .iter()
             .filter(|e| is_aggregate_expr(e))
-            .map(|e| e.clone())
+            .cloned()
             .collect();
 
         // apply projection or aggregate
-        let plan = if (select.group_by.len() > 0) | (aggr_expr.len() > 0) {
+        let plan = if !select.group_by.is_empty() | !aggr_expr.is_empty() {
             self.aggregate(&plan, projection_expr, &select.group_by, aggr_expr)?
         } else {
             self.project(&plan, projection_expr)?
         };
         Ok(plan)
-    }
-
-    /// Apply a filter to the plan
-    fn filter(
-        &self,
-        plan: &LogicalPlan,
-        predicate: &Option<SQLExpr>,
-    ) -> Result<LogicalPlan> {
-        match *predicate {
-            Some(ref predicate_expr) => LogicalPlanBuilder::from(&plan)
-                .filter(self.sql_to_rex(predicate_expr, &plan.schema())?)?
-                .build(),
-            _ => Ok(plan.clone()),
-        }
     }
 
     /// Wrap a plan in a projection
@@ -441,7 +505,7 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
         plan: &LogicalPlan,
         order_by: &Vec<OrderByExpr>,
     ) -> Result<LogicalPlan> {
-        if order_by.len() == 0 {
+        if order_by.is_empty() {
             return Ok(plan.clone());
         }
 
@@ -463,7 +527,7 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
     }
 
     /// Generate a relational expression from a select SQL expression
-    fn sql_select_to_rex(&self, sql: &SelectItem, schema: &Schema) -> Result<Expr> {
+    fn sql_select_to_rex(&self, sql: &SelectItem, schema: &DFSchema) -> Result<Expr> {
         match sql {
             SelectItem::UnnamedExpr(expr) => self.sql_to_rex(expr, schema),
             SelectItem::ExprWithAlias { expr, alias } => Ok(Alias(
@@ -478,7 +542,7 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
     }
 
     /// Generate a relational expression from a SQL expression
-    pub fn sql_to_rex(&self, sql: &SQLExpr, schema: &Schema) -> Result<Expr> {
+    pub fn sql_to_rex(&self, sql: &SQLExpr, schema: &DFSchema) -> Result<Expr> {
         match sql {
             SQLExpr::Value(Value::Number(n)) => match n.parse::<i64>() {
                 Ok(n) => Ok(lit(n)),
@@ -491,7 +555,7 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
                     let var_names = vec![id.value.clone()];
                     Ok(Expr::ScalarVariable(var_names))
                 } else {
-                    match schema.field_with_name(&id.value) {
+                    match schema.field_with_unqualified_name(&id.value) {
                         Ok(field) => Ok(Expr::Column(field.name().clone())),
                         Err(_) => Err(DataFusionError::Plan(format!(
                             "Invalid identifier '{}' for schema {}",
@@ -565,6 +629,14 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
                 data_type: convert_data_type(data_type)?,
             }),
 
+            SQLExpr::TypedString {
+                ref data_type,
+                ref value,
+            } => Ok(Expr::Cast {
+                expr: Box::new(lit(&**value)),
+                data_type: convert_data_type(data_type)?,
+            }),
+
             SQLExpr::IsNull(ref expr) => {
                 Ok(Expr::IsNull(Box::new(self.sql_to_rex(expr, schema)?)))
             }
@@ -573,14 +645,42 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
                 Ok(Expr::IsNotNull(Box::new(self.sql_to_rex(expr, schema)?)))
             }
 
-            SQLExpr::UnaryOp { ref op, ref expr } => match *op {
+            SQLExpr::UnaryOp { ref op, ref expr } => match op {
                 UnaryOperator::Not => {
                     Ok(Expr::Not(Box::new(self.sql_to_rex(expr, schema)?)))
                 }
-                _ => Err(DataFusionError::Internal(format!(
-                    "SQL binary operator cannot be interpreted as a unary operator"
-                ))),
+                UnaryOperator::Plus => Ok(self.sql_to_rex(expr, schema)?),
+                UnaryOperator::Minus => {
+                    match expr.as_ref() {
+                        // optimization: if it's a number literal, we applly the negative operator
+                        // here directly to calculate the new literal.
+                        SQLExpr::Value(Value::Number(n)) => match n.parse::<i64>() {
+                            Ok(n) => Ok(lit(-n)),
+                            Err(_) => Ok(lit(-n
+                                .parse::<f64>()
+                                .map_err(|_e| {
+                                    DataFusionError::Internal(format!(
+                                        "negative operator can be only applied to integer and float operands, got: {}",
+                                    n))
+                                })?)),
+                        },
+                        // not a literal, apply negative operator on expression
+                        _ => Ok(Expr::Negative(Box::new(self.sql_to_rex(expr, schema)?))),
+                    }
+                }
             },
+
+            SQLExpr::Between {
+                ref expr,
+                ref negated,
+                ref low,
+                ref high,
+            } => Ok(Expr::Between {
+                expr: Box::new(self.sql_to_rex(&expr, &schema)?),
+                negated: *negated,
+                low: Box::new(self.sql_to_rex(&low, &schema)?),
+                high: Box::new(self.sql_to_rex(&high, &schema)?),
+            }),
 
             SQLExpr::BinaryOp {
                 ref left,
@@ -696,15 +796,37 @@ impl<'a, S: SchemaProvider> SqlToRel<'a, S> {
     }
 }
 
-fn create_join_schema(left: &SchemaRef, right: &SchemaRef) -> Result<Schema> {
-    let mut fields = vec![];
-    for field in left.fields() {
-        fields.push(field.clone());
+/// Remove join expressions from a filter expression
+fn remove_join_expressions(
+    expr: &Expr,
+    join_columns: &[(&str, &str)],
+) -> Result<Option<Expr>> {
+    match expr {
+        Expr::BinaryExpr { left, op, right } => match op {
+            Operator::Eq => match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(l), Expr::Column(r)) => {
+                    if join_columns.contains(&(l, r)) || join_columns.contains(&(r, l)) {
+                        Ok(None)
+                    } else {
+                        Ok(Some(expr.clone()))
+                    }
+                }
+                _ => Ok(Some(expr.clone())),
+            },
+            Operator::And => {
+                let l = remove_join_expressions(left, join_columns)?;
+                let r = remove_join_expressions(right, join_columns)?;
+                match (l, r) {
+                    (Some(ll), Some(rr)) => Ok(Some(and(ll, rr))),
+                    (Some(ll), _) => Ok(Some(ll)),
+                    (_, Some(rr)) => Ok(Some(rr)),
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(Some(expr.clone())),
+        },
+        _ => Ok(Some(expr.clone())),
     }
-    for field in right.fields() {
-        fields.push(field.clone());
-    }
-    Ok(Schema::new(fields))
 }
 
 /// Parse equijoin ON condition which could be a single Eq or multiple conjunctive Eqs
@@ -743,6 +865,30 @@ fn extract_join_keys(expr: &Expr, accum: &mut Vec<(String, String)>) -> Result<(
     }
 }
 
+/// Extract join keys from a WHERE clause
+fn extract_possible_join_keys(
+    expr: &Expr,
+    accum: &mut Vec<(String, String)>,
+) -> Result<()> {
+    match expr {
+        Expr::BinaryExpr { left, op, right } => match op {
+            Operator::Eq => match (left.as_ref(), right.as_ref()) {
+                (Expr::Column(l), Expr::Column(r)) => {
+                    accum.push((l.to_owned(), r.to_owned()));
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
+            Operator::And => {
+                extract_possible_join_keys(left, accum)?;
+                extract_possible_join_keys(right, accum)
+            }
+            _ => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
 /// Determine if an expression is an aggregate expression or not
 fn is_aggregate_expr(e: &Expr) -> bool {
     match e {
@@ -763,6 +909,7 @@ pub fn convert_data_type(sql: &SQLDataType) -> Result<DataType> {
         SQLDataType::Double => Ok(DataType::Float64),
         SQLDataType::Char(_) | SQLDataType::Varchar(_) => Ok(DataType::Utf8),
         SQLDataType::Timestamp => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+        SQLDataType::Date => Ok(DataType::Date32(DateUnit::Day)),
         other => Err(DataFusionError::NotImplemented(format!(
             "Unsupported SQL type {:?}",
             other
@@ -836,6 +983,18 @@ mod tests {
     }
 
     #[test]
+    fn test_date_filter() {
+        let sql =
+            "SELECT state FROM person WHERE birth_date < CAST ('2020-01-01' as date)";
+
+        let expected = "Projection: #state\
+            \n  Filter: #birth_date Lt CAST(Utf8(\"2020-01-01\") AS Date32(Day))\
+            \n    TableScan: person projection=None";
+
+        quick_test(sql, expected);
+    }
+
+    #[test]
     fn select_all_boolean_operators() {
         let sql = "SELECT age, first_name, last_name \
                    FROM person \
@@ -853,6 +1012,26 @@ mod tests {
                         And #age Lt Int64(65) \
                         And #age LtEq Int64(65)\
                         \n    TableScan: person projection=None";
+        quick_test(sql, expected);
+    }
+
+    #[test]
+    fn select_between() {
+        let sql = "SELECT state FROM person WHERE age BETWEEN 21 AND 65";
+        let expected = "Projection: #state\
+            \n  Filter: #age BETWEEN Int64(21) AND Int64(65)\
+            \n    TableScan: person projection=None";
+
+        quick_test(sql, expected);
+    }
+
+    #[test]
+    fn select_between_negated() {
+        let sql = "SELECT state FROM person WHERE age NOT BETWEEN 21 AND 65";
+        let expected = "Projection: #state\
+            \n  Filter: #age NOT BETWEEN Int64(21) AND Int64(65)\
+            \n    TableScan: person projection=None";
+
         quick_test(sql, expected);
     }
 
@@ -980,6 +1159,24 @@ mod tests {
                    FROM aggregate_test_100 WHERE c3/nullif(c4+c5, 0) > 0.1";
         let expected = "Projection: #c3 Divide #c4 Plus #c5\
             \n  Filter: #c3 Divide nullif(#c4 Plus #c5, Int64(0)) Gt Float64(0.1)\
+            \n    TableScan: aggregate_test_100 projection=None";
+        quick_test(sql, expected);
+    }
+
+    #[test]
+    fn select_where_with_negative_operator() {
+        let sql = "SELECT c3 FROM aggregate_test_100 WHERE c3 > -0.1 AND -c4 > 0";
+        let expected = "Projection: #c3\
+            \n  Filter: #c3 Gt Float64(-0.1) And (- #c4) Gt Int64(0)\
+            \n    TableScan: aggregate_test_100 projection=None";
+        quick_test(sql, expected);
+    }
+
+    #[test]
+    fn select_where_with_positive_operator() {
+        let sql = "SELECT c3 FROM aggregate_test_100 WHERE c3 > +0.1 AND +c4 > 0";
+        let expected = "Projection: #c3\
+            \n  Filter: #c3 Gt Float64(0.1) And #c4 Gt Int64(0)\
             \n    TableScan: aggregate_test_100 projection=None";
         quick_test(sql, expected);
     }
@@ -1122,6 +1319,14 @@ mod tests {
         quick_test(sql, expected);
     }
 
+    #[test]
+    fn select_typedstring() {
+        let sql = "SELECT date '2020-12-10' AS date FROM person";
+        let expected = "Projection: CAST(Utf8(\"2020-12-10\") AS Date32(Day)) AS date\
+            \n  TableScan: person projection=None";
+        quick_test(sql, expected);
+    }
+
     fn logical_plan(sql: &str) -> Result<LogicalPlan> {
         let planner = SqlToRel::new(&MockSchemaProvider {});
         let result = DFParser::parse_sql(&sql);
@@ -1159,11 +1364,6 @@ mod tests {
                     Field::new("o_item_id", DataType::Utf8, false),
                     Field::new("qty", DataType::Int32, false),
                     Field::new("price", DataType::Float64, false),
-                    Field::new(
-                        "birth_date",
-                        DataType::Timestamp(TimeUnit::Nanosecond, None),
-                        false,
-                    ),
                 ]))),
                 "lineitem" => Some(Arc::new(Schema::new(vec![
                     Field::new("l_item_id", DataType::UInt32, false),

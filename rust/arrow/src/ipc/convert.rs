@@ -17,16 +17,13 @@
 
 //! Utilities for converting between IPC types and native Arrow types
 
-use crate::datatypes::{
-    DataType, DateUnit, Field, IntervalUnit, NullableDataType, Schema, TimeUnit,
-};
+use crate::datatypes::{DataType, DateUnit, Field, IntervalUnit, Schema, TimeUnit};
 use crate::ipc;
 
 use flatbuffers::{
     FlatBufferBuilder, ForwardsUOffset, UnionWIPOffset, Vector, WIPOffset,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use DataType::*;
 
@@ -99,6 +96,12 @@ pub fn fb_to_schema(fb: ipc::Schema) -> Schema {
     let len = c_fields.len();
     for i in 0..len {
         let c_field: ipc::Field = c_fields.get(i);
+        match c_field.type_type() {
+            ipc::Type::Decimal if fb.endianness() == ipc::Endianness::Big => {
+                unimplemented!("Big Endian is not supported for Decimal!")
+            }
+            _ => (),
+        };
         fields.push(c_field.into());
     }
 
@@ -127,12 +130,6 @@ pub fn schema_from_bytes(bytes: &[u8]) -> Option<Schema> {
 
 /// Get the Arrow data type from the flatbuffer Field table
 pub(crate) fn get_data_type(field: ipc::Field, may_be_dictionary: bool) -> DataType {
-    get_data_type_context(field, may_be_dictionary)
-        .data_type()
-        .clone()
-}
-
-fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> NullableDataType {
     if let Some(dictionary) = field.dictionary() {
         if may_be_dictionary {
             let int = dictionary.indexType().unwrap();
@@ -147,16 +144,14 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
                 (64, false) => DataType::UInt64,
                 _ => panic!("Unexpected bitwidth and signed"),
             };
-            let value_type = get_data_type_context(field, false).data_type().clone();
-            return NullableDataType::new(
-                DataType::Dictionary(Box::new(index_type), Box::new(value_type)),
-                // taking nullability from parent field
-                field.nullable(),
+            return DataType::Dictionary(
+                Box::new(index_type),
+                Box::new(get_data_type(field, false)),
             );
         }
     }
 
-    let data_type = match field.type_type() {
+    match field.type_type() {
         ipc::Type::Null => DataType::Null,
         ipc::Type::Bool => DataType::Boolean,
         ipc::Type::Int => {
@@ -170,7 +165,10 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
                 (32, false) => DataType::UInt32,
                 (64, true) => DataType::Int64,
                 (64, false) => DataType::UInt64,
-                _ => panic!("Unexpected bitwidth and signed"),
+                z => panic!(
+                    "Int type with bit width of {} and signed of {} not supported",
+                    z.0, z.1
+                ),
             }
         }
         ipc::Type::Binary => DataType::Binary,
@@ -187,6 +185,7 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
                 ipc::Precision::HALF => DataType::Float16,
                 ipc::Precision::SINGLE => DataType::Float32,
                 ipc::Precision::DOUBLE => DataType::Float64,
+                z => panic!("FloatingPoint type with precision of {:?} not supported", z),
             }
         }
         ipc::Type::Date => {
@@ -194,6 +193,7 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
             match date.unit() {
                 ipc::DateUnit::DAY => DataType::Date32(DateUnit::Day),
                 ipc::DateUnit::MILLISECOND => DataType::Date64(DateUnit::Millisecond),
+                z => panic!("Date type with unit of {:?} not supported", z),
             }
         }
         ipc::Type::Time => {
@@ -215,8 +215,7 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
         }
         ipc::Type::Timestamp => {
             let timestamp = field.type_as_timestamp().unwrap();
-            let timezone: Option<Arc<String>> =
-                timestamp.timezone().map(|tz| Arc::new(tz.to_string()));
+            let timezone: Option<String> = timestamp.timezone().map(|tz| tz.to_string());
             match timestamp.unit() {
                 ipc::TimeUnit::SECOND => DataType::Timestamp(TimeUnit::Second, timezone),
                 ipc::TimeUnit::MILLISECOND => {
@@ -228,6 +227,7 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
                 ipc::TimeUnit::NANOSECOND => {
                     DataType::Timestamp(TimeUnit::Nanosecond, timezone)
                 }
+                z => panic!("Timestamp type with unit of {:?} not supported", z),
             }
         }
         ipc::Type::Interval => {
@@ -237,6 +237,7 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
                     DataType::Interval(IntervalUnit::YearMonth)
                 }
                 ipc::IntervalUnit::DAY_TIME => DataType::Interval(IntervalUnit::DayTime),
+                z => panic!("Interval type with unit of {:?} unsupported", z),
             }
         }
         ipc::Type::Duration => {
@@ -246,6 +247,7 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
                 ipc::TimeUnit::MILLISECOND => DataType::Duration(TimeUnit::Millisecond),
                 ipc::TimeUnit::MICROSECOND => DataType::Duration(TimeUnit::Microsecond),
                 ipc::TimeUnit::NANOSECOND => DataType::Duration(TimeUnit::Nanosecond),
+                z => panic!("Duration type with unit of {:?} unsupported", z),
             }
         }
         ipc::Type::List => {
@@ -253,16 +255,14 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
             if children.len() != 1 {
                 panic!("expect a list to have one child")
             }
-            let child_field = children.get(0);
-            DataType::List(Box::new(get_data_type_context(child_field, false)))
+            DataType::List(Box::new(children.get(0).into()))
         }
         ipc::Type::LargeList => {
             let children = field.children().unwrap();
             if children.len() != 1 {
                 panic!("expect a large list to have one child")
             }
-            let child_field = children.get(0);
-            DataType::LargeList(Box::new(get_data_type_context(child_field, false)))
+            DataType::LargeList(Box::new(children.get(0).into()))
         }
         ipc::Type::FixedSizeList => {
             let children = field.children().unwrap();
@@ -270,11 +270,7 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
                 panic!("expect a list to have one child")
             }
             let fsl = field.type_as_fixed_size_list().unwrap();
-            let child_field = children.get(0);
-            DataType::FixedSizeList(
-                Box::new(get_data_type_context(child_field, false)),
-                fsl.listSize(),
-            )
+            DataType::FixedSizeList(Box::new(children.get(0).into()), fsl.listSize())
         }
         ipc::Type::Struct_ => {
             let mut fields = vec![];
@@ -286,10 +282,12 @@ fn get_data_type_context(field: ipc::Field, may_be_dictionary: bool) -> Nullable
 
             DataType::Struct(fields)
         }
+        ipc::Type::Decimal => {
+            let fsb = field.type_as_decimal().unwrap();
+            DataType::Decimal(fsb.precision() as usize, fsb.scale() as usize)
+        }
         t => unimplemented!("Type {:?} not supported", t),
-    };
-
-    NullableDataType::new(data_type, field.nullable())
+    }
 }
 
 pub(crate) struct FBFieldType<'b> {
@@ -309,8 +307,12 @@ pub(crate) fn build_field<'a>(
     let fb_dictionary = if let Dictionary(index_type, _) = field.data_type() {
         Some(get_fb_dictionary(
             index_type,
-            field.dict_id(),
-            field.dict_is_ordered(),
+            field
+                .dict_id()
+                .expect("All Dictionary types have `dict_id`"),
+            field
+                .dict_is_ordered()
+                .expect("All Dictionary types have `dict_is_ordered`"),
             fbb,
         ))
     } else {
@@ -475,7 +477,7 @@ pub(crate) fn get_fb_field_type<'a>(
             }
         }
         Timestamp(unit, tz) => {
-            let tz = tz.clone().unwrap_or_else(|| Arc::new(String::new()));
+            let tz = tz.clone().unwrap_or_else(String::new);
             let tz_str = fbb.create_string(tz.as_str());
             let mut builder = ipc::TimestampBuilder::new(fbb);
             let time_unit = match unit {
@@ -522,63 +524,24 @@ pub(crate) fn get_fb_field_type<'a>(
                 children: Some(fbb.create_vector(&empty_fields[..])),
             }
         }
-        List(ref type_ctx) => {
-            let nested_type =
-                get_fb_field_type(type_ctx.data_type(), type_ctx.is_nullable(), fbb);
-            let child = ipc::Field::create(
-                fbb,
-                &ipc::FieldArgs {
-                    name: None,
-                    nullable: type_ctx.is_nullable(),
-                    type_type: nested_type.type_type,
-                    type_: Some(nested_type.type_),
-                    children: nested_type.children,
-                    dictionary: None,
-                    custom_metadata: None,
-                },
-            );
+        List(ref list_type) => {
+            let child = build_field(fbb, list_type);
             FBFieldType {
                 type_type: ipc::Type::List,
                 type_: ipc::ListBuilder::new(fbb).finish().as_union_value(),
                 children: Some(fbb.create_vector(&[child])),
             }
         }
-        LargeList(ref type_ctx) => {
-            let inner_types =
-                get_fb_field_type(type_ctx.data_type(), type_ctx.is_nullable(), fbb);
-            let child = ipc::Field::create(
-                fbb,
-                &ipc::FieldArgs {
-                    name: None,
-                    nullable: type_ctx.is_nullable(),
-                    type_type: inner_types.type_type,
-                    type_: Some(inner_types.type_),
-                    dictionary: None,
-                    children: inner_types.children,
-                    custom_metadata: None,
-                },
-            );
+        LargeList(ref list_type) => {
+            let child = build_field(fbb, list_type);
             FBFieldType {
                 type_type: ipc::Type::LargeList,
                 type_: ipc::LargeListBuilder::new(fbb).finish().as_union_value(),
                 children: Some(fbb.create_vector(&[child])),
             }
         }
-        FixedSizeList(ref type_ctx, len) => {
-            let inner_types =
-                get_fb_field_type(type_ctx.data_type(), type_ctx.is_nullable(), fbb);
-            let child = ipc::Field::create(
-                fbb,
-                &ipc::FieldArgs {
-                    name: None,
-                    nullable: type_ctx.is_nullable(),
-                    type_type: inner_types.type_type,
-                    type_: Some(inner_types.type_),
-                    dictionary: None,
-                    children: inner_types.children,
-                    custom_metadata: None,
-                },
-            );
+        FixedSizeList(ref list_type, len) => {
+            let child = build_field(fbb, list_type);
             let mut builder = ipc::FixedSizeListBuilder::new(fbb);
             builder.add_listSize(*len as i32);
             FBFieldType {
@@ -618,6 +581,17 @@ pub(crate) fn get_fb_field_type<'a>(
             // pass through to the value type, as we've already captured the index
             // type in the DictionaryEncoding metadata in the parent field
             get_fb_field_type(value_type, is_nullable, fbb)
+        }
+        Decimal(precision, scale) => {
+            let mut builder = ipc::DecimalBuilder::new(fbb);
+            builder.add_precision(*precision as i32);
+            builder.add_scale(*scale as i32);
+            builder.add_bitWidth(128);
+            FBFieldType {
+                type_type: ipc::Type::Decimal,
+                type_: builder.finish().as_union_value(),
+                children: Some(fbb.create_vector(&empty_fields[..])),
+            }
         }
         t => unimplemented!("Type {:?} not supported", t),
     }
@@ -661,7 +635,7 @@ pub(crate) fn get_fb_dictionary<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datatypes::{DataType, Field, NullableDataType, Schema};
+    use crate::datatypes::{DataType, Field, Schema};
 
     #[test]
     fn convert_schema_round_trip() {
@@ -704,7 +678,7 @@ mod tests {
                     "timestamp[us]",
                     DataType::Timestamp(
                         TimeUnit::Microsecond,
-                        Some(Arc::new("Africa/Johannesburg".to_string())),
+                        Some("Africa/Johannesburg".to_string()),
                     ),
                     false,
                 ),
@@ -727,15 +701,13 @@ mod tests {
                 Field::new("binary", DataType::Binary, false),
                 Field::new(
                     "list[u8]",
-                    DataType::List(Box::new(NullableDataType::new(
-                        DataType::UInt8,
-                        false,
-                    ))),
+                    DataType::List(Box::new(Field::new("item", DataType::UInt8, false))),
                     true,
                 ),
                 Field::new(
                     "list[struct<float32, int32, bool>]",
-                    DataType::List(Box::new(NullableDataType::new(
+                    DataType::List(Box::new(Field::new(
+                        "struct",
                         DataType::Struct(vec![
                             Field::new("float32", DataType::UInt8, false),
                             Field::new("int32", DataType::Int32, true),
@@ -751,7 +723,8 @@ mod tests {
                         Field::new("int64", DataType::Int64, true),
                         Field::new(
                             "list[struct<date32, list[struct<>]>]",
-                            DataType::List(Box::new(NullableDataType::new(
+                            DataType::List(Box::new(Field::new(
+                                "struct",
                                 DataType::Struct(vec![
                                     Field::new(
                                         "date32",
@@ -760,7 +733,8 @@ mod tests {
                                     ),
                                     Field::new(
                                         "list[struct<>]",
-                                        DataType::List(Box::new(NullableDataType::new(
+                                        DataType::List(Box::new(Field::new(
+                                            "struct",
                                             DataType::Struct(vec![]),
                                             false,
                                         ))),
@@ -795,6 +769,7 @@ mod tests {
                     123,
                     true,
                 ),
+                Field::new("decimal<usize, usize>", DataType::Decimal(10, 6), false),
             ],
             md,
         );

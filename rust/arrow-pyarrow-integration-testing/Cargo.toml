@@ -15,27 +15,24 @@
 # specific language governing permissions and limitations
 # under the License.
 
-FROM debian:stretch
+[package]
+name = "arrow-pyarrow-integration-testing"
+description = ""
+version = "3.0.0-SNAPSHOT"
+homepage = "https://github.com/apache/arrow"
+repository = "https://github.com/apache/arrow"
+authors = ["Apache Arrow <dev@arrow.apache.org>"]
+license = "Apache-2.0"
+keywords = [ "arrow" ]
+edition = "2018"
 
-RUN \
-  echo "debconf debconf/frontend select Noninteractive" | \
-    debconf-set-selections
+[lib]
+name = "arrow_pyarrow_integration_testing"
+crate-type = ["cdylib"]
 
-RUN \
-  echo 'APT::Install-Recommends "false";' > \
-    /etc/apt/apt.conf.d/disable-install-recommends
+[dependencies]
+arrow = { path = "../arrow", version = "3.0.0-SNAPSHOT" }
+pyo3 = { version = "0.12.1", features = ["extension-module"] }
 
-ARG DEBUG
-
-RUN \
-  quiet=$([ "${DEBUG}" = "yes" ] || echo "-qq") && \
-  apt update ${quiet} && \
-  apt install -y -V ${quiet} \
-    build-essential \
-    debhelper \
-    devscripts \
-    fakeroot \
-    gnupg \
-    lsb-release && \
-  apt clean && \
-  rm -rf /var/lib/apt/lists/*
+[package.metadata.maturin]
+requires-dist = ["pyarrow>=1"]

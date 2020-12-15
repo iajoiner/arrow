@@ -174,9 +174,9 @@ pub fn to_timestamp(args: &[ArrayRef]) -> Result<TimestampNanosecondArray> {
             .as_any()
             .downcast_ref::<StringArray>()
             .ok_or_else(|| {
-                DataFusionError::Internal(format!(
-                    "could not cast to_timestamp input to StringArray"
-                ))
+                DataFusionError::Internal(
+                    "could not cast to_timestamp input to StringArray".to_string(),
+                )
             })?;
 
     let result = (0..num_rows)
@@ -280,7 +280,7 @@ mod tests {
         // timezone the test machine is running. Thus it is still
         // somewhat suceptable to bugs in the use of chrono
         let naive_datetime = NaiveDateTime::new(
-            NaiveDate::from_ymd(2020, 09, 08),
+            NaiveDate::from_ymd(2020, 9, 8),
             NaiveTime::from_hms_nano(13, 42, 29, 190855),
         );
 
@@ -298,7 +298,7 @@ mod tests {
         // Also ensure that parsing timestamps with no fractional
         // second part works as well
         let naive_datetime_whole_secs = NaiveDateTime::new(
-            NaiveDate::from_ymd(2020, 09, 08),
+            NaiveDate::from_ymd(2020, 9, 8),
             NaiveTime::from_hms(13, 42, 29),
         );
 
@@ -342,8 +342,7 @@ mod tests {
 
     fn expect_timestamp_parse_error(s: &str, expected_err: &str) {
         match string_to_timestamp_nanos(s) {
-            Ok(v) => assert!(
-                false,
+            Ok(v) => panic!(
                 "Expected error '{}' while parsing '{}', but parsed {} instead",
                 expected_err, s, v
             ),

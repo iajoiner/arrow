@@ -20,7 +20,9 @@
 use std::{ops::AddAssign, sync::Arc};
 
 use crate::buffer::{Buffer, MutableBuffer};
-use crate::compute::util::take_value_indices_from_list;
+use crate::compute::util::{
+    take_value_indices_from_fixed_size_list, take_value_indices_from_list,
+};
 use crate::datatypes::*;
 use crate::error::{ArrowError, Result};
 use crate::util::bit_util;
@@ -145,6 +147,9 @@ where
         DataType::LargeUtf8 => take_string::<i64, _>(values, indices),
         DataType::List(_) => take_list::<_, Int32Type>(values, indices),
         DataType::LargeList(_) => take_list::<_, Int64Type>(values, indices),
+        DataType::FixedSizeList(_, length) => {
+            take_fixed_size_list(values, indices, *length)
+        }
         DataType::Struct(fields) => {
             let struct_: &StructArray =
                 values.as_any().downcast_ref::<StructArray>().unwrap();
@@ -205,6 +210,7 @@ fn take_primitive<T, I>(
 ) -> Result<ArrayRef>
 where
     T: ArrowPrimitiveType,
+    T::Native: num::Num,
     I: ArrowNumericType,
     I::Native: ToPrimitive,
 {
@@ -214,19 +220,20 @@ where
 
     let null_count = array.null_count();
 
-    // This iteration is implemented with a while loop, rather than a
-    // map()/collect(), since the while loop performs better in the benchmarks.
-    let mut new_values: Vec<T::Native> = Vec::with_capacity(data_len);
+    let mut buffer = MutableBuffer::new(data_len * std::mem::size_of::<T::Native>());
+    buffer.resize(data_len * std::mem::size_of::<T::Native>());
+    let data = buffer.typed_data_mut();
+
     let nulls;
 
     if null_count == 0 {
         // Take indices without null checking
-        for i in 0..data_len {
+        for (i, elem) in data.iter_mut().enumerate() {
             let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
                 ArrowError::ComputeError("Cast to usize failed".to_string())
             })?;
 
-            new_values.push(array.value(index));
+            *elem = array.value(index);
         }
         nulls = indices.data_ref().null_buffer().cloned();
     } else {
@@ -235,7 +242,7 @@ where
 
         let null_slice = null_buf.data_mut();
 
-        for i in 0..data_len {
+        for (i, elem) in data.iter_mut().enumerate() {
             let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
                 ArrowError::ComputeError("Cast to usize failed".to_string())
             })?;
@@ -244,7 +251,7 @@ where
                 bit_util::unset_bit(null_slice, i);
             }
 
-            new_values.push(array.value(index));
+            *elem = array.value(index);
         }
         nulls = match indices.data_ref().null_buffer() {
             Some(buffer) => Some(buffer_bin_and(
@@ -264,7 +271,7 @@ where
         None,
         nulls,
         0,
-        vec![Buffer::from(new_values.to_byte_slice())],
+        vec![buffer.freeze()],
         vec![],
     );
     Ok(Arc::new(PrimitiveArray::<T>::from(Arc::new(data))))
@@ -364,44 +371,108 @@ where
         .downcast_ref::<GenericStringArray<OffsetSize>>()
         .unwrap();
 
-    let num_bytes = bit_util::ceil(data_len, 8);
-    let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
-    let null_slice = null_buf.data_mut();
+    let bytes_offset = (data_len + 1) * std::mem::size_of::<OffsetSize>();
+    let mut offsets_buffer = MutableBuffer::new(bytes_offset);
+    offsets_buffer.resize(bytes_offset);
 
-    let mut offsets = Vec::with_capacity(data_len + 1);
-    let mut values = Vec::with_capacity(data_len);
+    let offsets = offsets_buffer.typed_data_mut();
+    let mut values = Vec::with_capacity(bytes_offset);
     let mut length_so_far = OffsetSize::zero();
+    offsets[0] = length_so_far;
 
-    offsets.push(length_so_far);
-    for i in 0..data_len {
-        let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
-            ArrowError::ComputeError("Cast to usize failed".to_string())
-        })?;
+    let nulls;
+    if array.null_count() == 0 && indices.null_count() == 0 {
+        for (i, offset) in offsets.iter_mut().skip(1).enumerate() {
+            let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
+                ArrowError::ComputeError("Cast to usize failed".to_string())
+            })?;
 
-        if array.is_valid(index) && indices.is_valid(i) {
             let s = array.value(index);
 
             length_so_far += OffsetSize::from_usize(s.len()).unwrap();
             values.extend_from_slice(s.as_bytes());
-        } else {
-            // set null bit
-            bit_util::unset_bit(null_slice, i);
+            *offset = length_so_far;
         }
-        offsets.push(length_so_far);
+        nulls = None
+    } else if indices.null_count() == 0 {
+        let num_bytes = bit_util::ceil(data_len, 8);
+
+        let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
+        let null_slice = null_buf.data_mut();
+
+        for (i, offset) in offsets.iter_mut().skip(1).enumerate() {
+            let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
+                ArrowError::ComputeError("Cast to usize failed".to_string())
+            })?;
+
+            if array.is_valid(index) {
+                let s = array.value(index);
+
+                length_so_far += OffsetSize::from_usize(s.len()).unwrap();
+                values.extend_from_slice(s.as_bytes());
+            } else {
+                bit_util::unset_bit(null_slice, i);
+            }
+            *offset = length_so_far;
+        }
+        nulls = Some(null_buf.freeze());
+    } else if array.null_count() == 0 {
+        for (i, offset) in offsets.iter_mut().skip(1).enumerate() {
+            if indices.is_valid(i) {
+                let index =
+                    ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
+                        ArrowError::ComputeError("Cast to usize failed".to_string())
+                    })?;
+
+                let s = array.value(index);
+
+                length_so_far += OffsetSize::from_usize(s.len()).unwrap();
+                values.extend_from_slice(s.as_bytes());
+            }
+            *offset = length_so_far;
+        }
+        nulls = indices.data_ref().null_buffer().cloned();
+    } else {
+        let num_bytes = bit_util::ceil(data_len, 8);
+
+        let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
+        let null_slice = null_buf.data_mut();
+
+        for (i, offset) in offsets.iter_mut().skip(1).enumerate() {
+            let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
+                ArrowError::ComputeError("Cast to usize failed".to_string())
+            })?;
+
+            if array.is_valid(index) && indices.is_valid(i) {
+                let s = array.value(index);
+
+                length_so_far += OffsetSize::from_usize(s.len()).unwrap();
+                values.extend_from_slice(s.as_bytes());
+            } else {
+                // set null bit
+                bit_util::unset_bit(null_slice, i);
+            }
+            *offset = length_so_far;
+        }
+
+        nulls = match indices.data_ref().null_buffer() {
+            Some(buffer) => {
+                Some(buffer_bin_and(buffer, 0, &null_buf.freeze(), 0, data_len))
+            }
+            None => Some(null_buf.freeze()),
+        };
     }
 
-    let nulls = match indices.data_ref().null_buffer() {
-        Some(buffer) => buffer_bin_and(buffer, 0, &null_buf.freeze(), 0, data_len),
-        None => null_buf.freeze(),
-    };
-
-    let data = ArrayData::builder(<OffsetSize as StringOffsetSizeTrait>::DATA_TYPE)
+    let mut data = ArrayData::builder(<OffsetSize as StringOffsetSizeTrait>::DATA_TYPE)
         .len(data_len)
-        .null_bit_buffer(nulls)
-        .add_buffer(Buffer::from(offsets.to_byte_slice()))
-        .add_buffer(Buffer::from(&values[..]))
-        .build();
-    Ok(Arc::new(GenericStringArray::<OffsetSize>::from(data)))
+        .add_buffer(offsets_buffer.freeze())
+        .add_buffer(Buffer::from(values));
+    if let Some(null_buffer) = nulls {
+        data = data.null_bit_buffer(null_buffer);
+    }
+    Ok(Arc::new(GenericStringArray::<OffsetSize>::from(
+        data.build(),
+    )))
 }
 
 /// `take` implementation for list arrays
@@ -428,7 +499,7 @@ where
         .unwrap();
 
     let (list_indices, offsets) =
-        take_value_indices_from_list::<IndexType, OffsetType>(values, indices)?;
+        take_value_indices_from_list::<IndexType, OffsetType>(list, indices)?;
 
     let taken = take_impl::<OffsetType>(&list.values(), &list_indices, None)?;
     // determine null count and null buffer, which are a function of `values` and `indices`
@@ -462,6 +533,56 @@ where
     Ok(list_array)
 }
 
+/// `take` implementation for `FixedSizeListArray`
+///
+/// Calculates the index and indexed offset for the inner array,
+/// applying `take` on the inner array, then reconstructing a list array
+/// with the indexed offsets
+fn take_fixed_size_list<IndexType>(
+    values: &ArrayRef,
+    indices: &PrimitiveArray<IndexType>,
+    length: <Int32Type as ArrowPrimitiveType>::Native,
+) -> Result<ArrayRef>
+where
+    IndexType: ArrowNumericType,
+    IndexType::Native: ToPrimitive,
+{
+    let indices = indices
+        .as_any()
+        .downcast_ref::<PrimitiveArray<Int32Type>>()
+        .expect("FixedSizeListArray's indices type should be 32-bit signed integer");
+    let list = values
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .unwrap();
+
+    let list_indices = take_value_indices_from_fixed_size_list(list, indices, length);
+    let taken = take_impl::<Int32Type>(&list.values(), &list_indices, None)?;
+
+    // determine null count and null buffer, which are a function of `values` and `indices`
+    let mut null_count = 0;
+    let num_bytes = bit_util::ceil(indices.len(), 8);
+    let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
+    let null_slice = null_buf.data_mut();
+
+    for i in 0..indices.len() {
+        if !indices.is_valid(i) || list.is_null(indices.value(i) as usize) {
+            bit_util::unset_bit(null_slice, i);
+            null_count += 1;
+        }
+    }
+
+    let list_data = ArrayDataBuilder::new(list.data_type().clone())
+        .len(indices.len())
+        .null_count(null_count)
+        .null_bit_buffer(null_buf.freeze())
+        .offset(0)
+        .add_child_data(taken.data())
+        .build();
+
+    Ok(Arc::new(FixedSizeListArray::from(list_data)))
+}
+
 /// `take` implementation for dictionary arrays
 ///
 /// applies `take` to the keys of the dictionary array and returns a new dictionary array
@@ -469,6 +590,7 @@ where
 fn take_dict<T, I>(values: &ArrayRef, indices: &PrimitiveArray<I>) -> Result<ArrayRef>
 where
     T: ArrowPrimitiveType,
+    T::Native: num::Num,
     I: ArrowNumericType,
     I::Native: ToPrimitive,
 {
@@ -496,6 +618,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compute::util::tests::build_fixed_size_list;
+
+    fn test_take_boolean_arrays(
+        data: Vec<Option<bool>>,
+        index: &UInt32Array,
+        options: Option<TakeOptions>,
+        expected_data: Vec<Option<bool>>,
+    ) {
+        let output = BooleanArray::from(data);
+        let expected = Arc::new(BooleanArray::from(expected_data)) as ArrayRef;
+        let output = take(&(Arc::new(output) as ArrayRef), index, options).unwrap();
+        assert_eq!(&output, &expected)
+    }
 
     fn test_take_primitive_arrays<T>(
         data: Vec<Option<T::Native>>,
@@ -758,7 +893,7 @@ mod tests {
     fn test_take_primitive_bool() {
         let index = UInt32Array::from(vec![Some(3), None, Some(1), Some(3), Some(2)]);
         // boolean
-        test_take_primitive_arrays::<BooleanType>(
+        test_take_boolean_arrays(
             vec![Some(false), None, Some(true), Some(false), None],
             &index,
             None,
@@ -810,9 +945,11 @@ mod tests {
             let value_offsets: [$offset_type; 4] = [0, 3, 6, 8];
             let value_offsets = Buffer::from(&value_offsets.to_byte_slice());
             // Construct a list array from the above two
-            let list_data_type = DataType::$list_data_type(Box::new(
-                NullableDataType::new(DataType::Int32, false),
-            ));
+            let list_data_type = DataType::$list_data_type(Box::new(Field::new(
+                "item",
+                DataType::Int32,
+                false,
+            )));
             let list_data = ArrayData::builder(list_data_type.clone())
                 .len(3)
                 .add_buffer(value_offsets)
@@ -881,9 +1018,11 @@ mod tests {
             let value_offsets: [$offset_type; 5] = [0, 3, 6, 7, 9];
             let value_offsets = Buffer::from(&value_offsets.to_byte_slice());
             // Construct a list array from the above two
-            let list_data_type = DataType::$list_data_type(Box::new(
-                NullableDataType::new(DataType::Int32, false),
-            ));
+            let list_data_type = DataType::$list_data_type(Box::new(Field::new(
+                "item",
+                DataType::Int32,
+                false,
+            )));
             let list_data = ArrayData::builder(list_data_type.clone())
                 .len(4)
                 .add_buffer(value_offsets)
@@ -952,9 +1091,11 @@ mod tests {
             let value_offsets: [$offset_type; 5] = [0, 3, 6, 6, 8];
             let value_offsets = Buffer::from(&value_offsets.to_byte_slice());
             // Construct a list array from the above two
-            let list_data_type = DataType::$list_data_type(Box::new(
-                NullableDataType::new(DataType::Int32, false),
-            ));
+            let list_data_type = DataType::$list_data_type(Box::new(Field::new(
+                "item",
+                DataType::Int32,
+                false,
+            )));
             let list_data = ArrayData::builder(list_data_type.clone())
                 .len(4)
                 .add_buffer(value_offsets)
@@ -1006,6 +1147,28 @@ mod tests {
         }};
     }
 
+    fn do_take_fixed_size_list_test<T>(
+        length: <Int32Type as ArrowPrimitiveType>::Native,
+        input_data: Vec<Option<Vec<Option<T::Native>>>>,
+        indices: Vec<<Int32Type as ArrowPrimitiveType>::Native>,
+        expected_data: Vec<Option<Vec<Option<T::Native>>>>,
+    ) where
+        T: ArrowPrimitiveType,
+        PrimitiveArray<T>: From<Vec<Option<T::Native>>>,
+    {
+        let indices = Int32Array::from(indices);
+
+        let input_array: ArrayRef =
+            Arc::new(build_fixed_size_list::<T>(input_data, length));
+
+        let output = take_fixed_size_list(&input_array, &indices, length).unwrap();
+
+        let expected: ArrayRef =
+            Arc::new(build_fixed_size_list::<T>(expected_data, length));
+
+        assert_eq!(&output, &expected)
+    }
+
     #[test]
     fn test_take_list() {
         test_take_list!(i32, List, ListArray);
@@ -1037,6 +1200,62 @@ mod tests {
     }
 
     #[test]
+    fn test_take_fixed_size_list() {
+        do_take_fixed_size_list_test::<Int32Type>(
+            3,
+            vec![
+                Some(vec![None, Some(1), Some(2)]),
+                Some(vec![Some(3), Some(4), None]),
+                Some(vec![Some(6), Some(7), Some(8)]),
+            ],
+            vec![2, 1, 0],
+            vec![
+                Some(vec![Some(6), Some(7), Some(8)]),
+                Some(vec![Some(3), Some(4), None]),
+                Some(vec![None, Some(1), Some(2)]),
+            ],
+        );
+
+        do_take_fixed_size_list_test::<UInt8Type>(
+            1,
+            vec![
+                Some(vec![Some(1)]),
+                Some(vec![Some(2)]),
+                Some(vec![Some(3)]),
+                Some(vec![Some(4)]),
+                Some(vec![Some(5)]),
+                Some(vec![Some(6)]),
+                Some(vec![Some(7)]),
+                Some(vec![Some(8)]),
+            ],
+            vec![2, 7, 0],
+            vec![
+                Some(vec![Some(3)]),
+                Some(vec![Some(8)]),
+                Some(vec![Some(1)]),
+            ],
+        );
+
+        do_take_fixed_size_list_test::<UInt64Type>(
+            3,
+            vec![
+                Some(vec![Some(10), Some(11), Some(12)]),
+                Some(vec![Some(13), Some(14), Some(15)]),
+                None,
+                Some(vec![Some(16), Some(17), Some(18)]),
+            ],
+            vec![3, 2, 1, 2, 0],
+            vec![
+                Some(vec![Some(16), Some(17), Some(18)]),
+                None,
+                Some(vec![Some(13), Some(14), Some(15)]),
+                None,
+                Some(vec![Some(10), Some(11), Some(12)]),
+            ],
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "index out of bounds: the len is 4 but the index is 1000")]
     fn test_take_list_out_of_bounds() {
         // Construct a value array, [[0,0,0], [-1,-2,-1], [2,3]]
@@ -1045,7 +1264,7 @@ mod tests {
         let value_offsets = Buffer::from(&[0, 3, 6, 8].to_byte_slice());
         // Construct a list array from the above two
         let list_data_type =
-            DataType::List(Box::new(NullableDataType::new(DataType::Int32, false)));
+            DataType::List(Box::new(Field::new("item", DataType::Int32, false)));
         let list_data = ArrayData::builder(list_data_type)
             .len(3)
             .add_buffer(value_offsets)

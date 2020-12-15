@@ -70,6 +70,9 @@ pub fn can_cast_types(from_type: &DataType, to_type: &DataType) -> bool {
 
         (_, Boolean) => DataType::is_numeric(from_type),
         (Boolean, _) => DataType::is_numeric(to_type) || to_type == &Utf8,
+
+        (Utf8, Date32(DateUnit::Day)) => true,
+        (Utf8, Date64(DateUnit::Millisecond)) => true,
         (Utf8, _) => DataType::is_numeric(to_type),
         (_, Utf8) => DataType::is_numeric(from_type) || from_type == &Binary,
 
@@ -376,6 +379,47 @@ pub fn cast(array: &ArrayRef, to_type: &DataType) -> Result<ArrayRef> {
             Int64 => cast_string_to_numeric::<Int64Type>(array),
             Float32 => cast_string_to_numeric::<Float32Type>(array),
             Float64 => cast_string_to_numeric::<Float64Type>(array),
+            Date32(DateUnit::Day) => {
+                use chrono::{NaiveDate, NaiveTime};
+                let zero_time = NaiveTime::from_hms(0, 0, 0);
+                let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                let mut builder = PrimitiveBuilder::<Date32Type>::new(string_array.len());
+                for i in 0..string_array.len() {
+                    if string_array.is_null(i) {
+                        builder.append_null()?;
+                    } else {
+                        match NaiveDate::parse_from_str(string_array.value(i), "%Y-%m-%d")
+                        {
+                            Ok(date) => builder.append_value(
+                                (date.and_time(zero_time).timestamp() / SECONDS_IN_DAY)
+                                    as i32,
+                            )?,
+                            Err(_) => builder.append_null()?, // not a valid date
+                        };
+                    }
+                }
+                Ok(Arc::new(builder.finish()) as ArrayRef)
+            }
+            Date64(DateUnit::Millisecond) => {
+                use chrono::{NaiveDate, NaiveTime};
+                let zero_time = NaiveTime::from_hms(0, 0, 0);
+                let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
+                let mut builder = PrimitiveBuilder::<Date64Type>::new(string_array.len());
+                for i in 0..string_array.len() {
+                    if string_array.is_null(i) {
+                        builder.append_null()?;
+                    } else {
+                        match NaiveDate::parse_from_str(string_array.value(i), "%Y-%m-%d")
+                        {
+                            Ok(date) => builder.append_value(
+                                date.and_time(zero_time).timestamp_millis() as i64,
+                            )?,
+                            Err(_) => builder.append_null()?, // not a valid date
+                        };
+                    }
+                }
+                Ok(Arc::new(builder.finish()) as ArrayRef)
+            }
             _ => Err(ArrowError::ComputeError(format!(
                 "Casting from {:?} to {:?} not supported",
                 from_type, to_type,
@@ -1237,7 +1281,7 @@ mod tests {
         let array = Arc::new(a) as ArrayRef;
         let b = cast(
             &array,
-            &DataType::List(Box::new(NullableDataType::new(DataType::Int32, true))),
+            &DataType::List(Box::new(Field::new("item", DataType::Int32, true))),
         )
         .unwrap();
         assert_eq!(5, b.len());
@@ -1267,7 +1311,7 @@ mod tests {
         let array = Arc::new(a) as ArrayRef;
         let b = cast(
             &array,
-            &DataType::List(Box::new(NullableDataType::new(DataType::Int32, true))),
+            &DataType::List(Box::new(Field::new("item", DataType::Int32, true))),
         )
         .unwrap();
         assert_eq!(5, b.len());
@@ -1300,7 +1344,7 @@ mod tests {
         let array = array.slice(2, 4);
         let b = cast(
             &array,
-            &DataType::List(Box::new(NullableDataType::new(DataType::Float64, true))),
+            &DataType::List(Box::new(Field::new("item", DataType::Float64, true))),
         )
         .unwrap();
         assert_eq!(4, b.len());
@@ -1377,7 +1421,7 @@ mod tests {
 
         // Construct a list array from the above two
         let list_data_type =
-            DataType::List(Box::new(NullableDataType::new(DataType::Int32, true)));
+            DataType::List(Box::new(Field::new("item", DataType::Int32, true)));
         let list_data = ArrayData::builder(list_data_type)
             .len(3)
             .add_buffer(value_offsets)
@@ -1387,7 +1431,7 @@ mod tests {
 
         let cast_array = cast(
             &list_array,
-            &DataType::List(Box::new(NullableDataType::new(DataType::UInt16, true))),
+            &DataType::List(Box::new(Field::new("item", DataType::UInt16, true))),
         )
         .unwrap();
         // 3 negative values should get lost when casting to unsigned,
@@ -1436,7 +1480,7 @@ mod tests {
 
         // Construct a list array from the above two
         let list_data_type =
-            DataType::List(Box::new(NullableDataType::new(DataType::Int32, true)));
+            DataType::List(Box::new(Field::new("item", DataType::Int32, true)));
         let list_data = ArrayData::builder(list_data_type)
             .len(3)
             .add_buffer(value_offsets)
@@ -1446,7 +1490,8 @@ mod tests {
 
         cast(
             &list_array,
-            &DataType::List(Box::new(NullableDataType::new(
+            &DataType::List(Box::new(Field::new(
+                "item",
                 DataType::Timestamp(TimeUnit::Microsecond, None),
                 true,
             ))),
@@ -1499,7 +1544,7 @@ mod tests {
     fn test_cast_timestamp_to_date32() {
         let a = TimestampMillisecondArray::from_opt_vec(
             vec![Some(864000000005), Some(1545696000001), None],
-            Some(Arc::new(String::from("UTC"))),
+            Some(String::from("UTC")),
         );
         let array = Arc::new(a) as ArrayRef;
         let b = cast(&array, &DataType::Date32(DateUnit::Day)).unwrap();
@@ -1527,7 +1572,7 @@ mod tests {
     fn test_cast_timestamp_to_i64() {
         let a = TimestampMillisecondArray::from_opt_vec(
             vec![Some(864000000005), Some(1545696000001), None],
-            Some(Arc::new("UTC".to_string())),
+            Some("UTC".to_string()),
         );
         let array = Arc::new(a) as ArrayRef;
         let b = cast(&array, &DataType::Int64).unwrap();
@@ -2720,6 +2765,68 @@ mod tests {
     }
 
     #[test]
+    fn test_cast_utf8_to_date32() {
+        use chrono::{NaiveDate, NaiveTime};
+
+        let a = StringArray::from(vec![
+            "2000-01-01",          // valid date with leading 0s
+            "2000-2-2",            // valid date without leading 0s
+            "2000-00-00",          // invalid month and day
+            "2000-01-01T12:00:00", // date + time is invalid
+            "2000",                // just a year is invalid
+        ]);
+        let array = Arc::new(a) as ArrayRef;
+        let b = cast(&array, &DataType::Date32(DateUnit::Day)).unwrap();
+        let c = b.as_any().downcast_ref::<Date32Array>().unwrap();
+
+        let zero_time = NaiveTime::from_hms(0, 0, 0);
+        // test valid inputs
+        let date_value = (NaiveDate::from_ymd(2000, 1, 1)
+            .and_time(zero_time)
+            .timestamp()
+            / SECONDS_IN_DAY) as i32;
+        assert_eq!(true, c.is_valid(0)); // "2000-01-01"
+        assert_eq!(date_value, c.value(0));
+
+        let date_value = (NaiveDate::from_ymd(2000, 2, 2)
+            .and_time(zero_time)
+            .timestamp()
+            / SECONDS_IN_DAY) as i32;
+        assert_eq!(true, c.is_valid(1)); // "2000-2-2"
+        assert_eq!(date_value, c.value(1));
+
+        // test invalid inputs
+        assert_eq!(false, c.is_valid(2)); // "2000-00-00"
+        assert_eq!(false, c.is_valid(3)); // "2000-01-01T12:00:00"
+        assert_eq!(false, c.is_valid(4)); // "2000"
+    }
+
+    #[test]
+    fn test_cast_utf8_to_date64() {
+        let a = StringArray::from(vec![
+            "2000-01-01",          // valid date with leading 0s
+            "2000-2-2",            // valid date without leading 0s
+            "2000-00-00",          // invalid month and day
+            "2000-01-01T12:00:00", // date + time is invalid
+            "2000",                // just a year is invalid
+        ]);
+        let array = Arc::new(a) as ArrayRef;
+        let b = cast(&array, &DataType::Date64(DateUnit::Millisecond)).unwrap();
+        let c = b.as_any().downcast_ref::<Date64Array>().unwrap();
+
+        // test valid inputs
+        assert_eq!(true, c.is_valid(0)); // "2000-01-01"
+        assert_eq!(946684800000, c.value(0));
+        assert_eq!(true, c.is_valid(1)); // "2000-2-2"
+        assert_eq!(949449600000, c.value(1));
+
+        // test invalid inputs
+        assert_eq!(false, c.is_valid(2)); // "2000-00-00"
+        assert_eq!(false, c.is_valid(3)); // "2000-01-01T12:00:00"
+        assert_eq!(false, c.is_valid(4)); // "2000"
+    }
+
+    #[test]
     fn test_can_cast_types() {
         // this function attempts to ensure that can_cast_types stays
         // in sync with cast.  It simply tries all combinations of
@@ -2754,7 +2861,7 @@ mod tests {
 
     /// Create instances of arrays with varying types for cast tests
     fn get_arrays_of_all_types() -> Vec<ArrayRef> {
-        let tz_name = Arc::new(String::from("America/New_York"));
+        let tz_name = String::from("America/New_York");
         let binary_data: Vec<&[u8]> = vec![b"foo", b"bar"];
         vec![
             Arc::new(BinaryArray::from(binary_data.clone())),
@@ -2853,7 +2960,7 @@ mod tests {
 
         // Construct a list array from the above two
         let list_data_type =
-            DataType::List(Box::new(NullableDataType::new(DataType::Int32, true)));
+            DataType::List(Box::new(Field::new("item", DataType::Int32, true)));
         let list_data = ArrayData::builder(list_data_type)
             .len(3)
             .add_buffer(value_offsets)
@@ -2875,7 +2982,7 @@ mod tests {
 
         // Construct a list array from the above two
         let list_data_type =
-            DataType::LargeList(Box::new(NullableDataType::new(DataType::Int32, true)));
+            DataType::LargeList(Box::new(Field::new("item", DataType::Int32, true)));
         let list_data = ArrayData::builder(list_data_type)
             .len(3)
             .add_buffer(value_offsets)
@@ -2895,7 +3002,7 @@ mod tests {
 
         // Construct a fixed size list array from the above two
         let list_data_type = DataType::FixedSizeList(
-            Box::new(NullableDataType::new(DataType::Int32, true)),
+            Box::new(Field::new("item", DataType::Int32, true)),
             2,
         );
         let list_data = ArrayData::builder(list_data_type)
@@ -2918,7 +3025,7 @@ mod tests {
     fn make_union_array() -> UnionArray {
         let mut builder = UnionBuilder::new_dense(7);
         builder.append::<Int32Type>("a", 1).unwrap();
-        builder.append::<BooleanType>("b", false).unwrap();
+        builder.append::<Int64Type>("b", 2).unwrap();
         builder.build().unwrap()
     }
 
@@ -2947,7 +3054,7 @@ mod tests {
     // Get a selection of datatypes to try and cast to
     fn get_all_types() -> Vec<DataType> {
         use DataType::*;
-        let tz_name = Arc::new(String::from("America/New_York"));
+        let tz_name = String::from("America/New_York");
 
         vec![
             Null,
@@ -2988,12 +3095,12 @@ mod tests {
             LargeBinary,
             Utf8,
             LargeUtf8,
-            List(Box::new(NullableDataType::new(DataType::Int8, true))),
-            List(Box::new(NullableDataType::new(DataType::Utf8, true))),
-            FixedSizeList(Box::new(NullableDataType::new(DataType::Int8, true)), 10),
-            FixedSizeList(Box::new(NullableDataType::new(DataType::Utf8, false)), 10),
-            LargeList(Box::new(NullableDataType::new(DataType::Int8, true))),
-            LargeList(Box::new(NullableDataType::new(DataType::Utf8, false))),
+            List(Box::new(Field::new("item", DataType::Int8, true))),
+            List(Box::new(Field::new("item", DataType::Utf8, true))),
+            FixedSizeList(Box::new(Field::new("item", DataType::Int8, true)), 10),
+            FixedSizeList(Box::new(Field::new("item", DataType::Utf8, false)), 10),
+            LargeList(Box::new(Field::new("item", DataType::Int8, true))),
+            LargeList(Box::new(Field::new("item", DataType::Utf8, false))),
             Struct(vec![
                 Field::new("f1", DataType::Int32, false),
                 Field::new("f2", DataType::Utf8, true),

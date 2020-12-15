@@ -174,7 +174,7 @@ def test_sequence_boolean(seq):
 
 @parametrize_with_iterable_types
 def test_sequence_numpy_boolean(seq):
-    expected = [np.bool(True), None, np.bool(False), None]
+    expected = [np.bool_(True), None, np.bool_(False), None]
     arr = pa.array(seq(expected))
     assert arr.type == pa.bool_()
     assert arr.to_pylist() == [True, None, False, None]
@@ -1481,10 +1481,9 @@ def test_sequence_decimal_large_integer():
 def test_sequence_decimal_from_integers():
     data = [0, 1, -39402950693754869342983]
     expected = [decimal.Decimal(x) for x in data]
-    # TODO: update this test after scaling implementation.
-    type = pa.decimal128(precision=28, scale=5)
-    arr = pa.array(data, type=type)
-    assert arr.to_pylist() == expected
+    for type in [pa.decimal128, pa.decimal256]:
+        arr = pa.array(data, type=type(precision=28, scale=5))
+        assert arr.to_pylist() == expected
 
 
 def test_sequence_decimal_too_high_precision():

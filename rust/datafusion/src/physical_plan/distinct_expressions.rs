@@ -22,7 +22,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType, Field, NullableDataType};
+use arrow::datatypes::{DataType, Field};
 
 use ahash::RandomState;
 use std::collections::HashSet;
@@ -81,10 +81,7 @@ impl AggregateExpr for DistinctCount {
             .map(|data_type| {
                 Field::new(
                     &format_state_name(&self.name, "count distinct"),
-                    DataType::List(Box::new(NullableDataType::new(
-                        data_type.clone(),
-                        true,
-                    ))),
+                    DataType::List(Box::new(Field::new("item", data_type.clone(), true))),
                     false,
                 )
             })
@@ -127,7 +124,7 @@ impl Accumulator for DistinctCountAccumulator {
     }
 
     fn merge(&mut self, states: &Vec<ScalarValue>) -> Result<()> {
-        if states.len() == 0 {
+        if states.is_empty() {
             return Ok(());
         }
 
@@ -141,15 +138,13 @@ impl Accumulator for DistinctCountAccumulator {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        (0..col_values[0].len())
-            .map(|row_index| {
-                let row_values = col_values
-                    .iter()
-                    .map(|col| col[row_index].clone())
-                    .collect::<Vec<_>>();
-                self.update(&row_values)
-            })
-            .collect::<Result<_>>()
+        (0..col_values[0].len()).try_for_each(|row_index| {
+            let row_values = col_values
+                .iter()
+                .map(|col| col[row_index].clone())
+                .collect::<Vec<_>>();
+            self.update(&row_values)
+        })
     }
 
     fn state(&self) -> Result<Vec<ScalarValue>> {
@@ -181,12 +176,10 @@ impl Accumulator for DistinctCountAccumulator {
     fn evaluate(&self) -> Result<ScalarValue> {
         match &self.count_data_type {
             DataType::UInt64 => Ok(ScalarValue::UInt64(Some(self.values.len() as u64))),
-            t => {
-                return Err(DataFusionError::Internal(format!(
-                    "Invalid data type {:?} for count distinct aggregation",
-                    t
-                )))
-            }
+            t => Err(DataFusionError::Internal(format!(
+                "Invalid data type {:?} for count distinct aggregation",
+                t
+            ))),
         }
     }
 }

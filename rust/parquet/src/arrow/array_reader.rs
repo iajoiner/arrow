@@ -25,10 +25,10 @@ use std::vec::Vec;
 
 use arrow::array::{
     Array, ArrayData, ArrayDataBuilder, ArrayDataRef, ArrayRef, BinaryArray,
-    BinaryBuilder, BooleanBufferBuilder, BufferBuilderTrait, FixedSizeBinaryArray,
-    FixedSizeBinaryBuilder, GenericListArray, Int16BufferBuilder, ListBuilder,
-    OffsetSizeTrait, PrimitiveArray, PrimitiveBuilder, StringArray, StringBuilder,
-    StructArray,
+    BinaryBuilder, BooleanArray, BooleanBufferBuilder, BufferBuilderTrait,
+    FixedSizeBinaryArray, FixedSizeBinaryBuilder, GenericListArray, Int16BufferBuilder,
+    ListBuilder, OffsetSizeTrait, PrimitiveArray, PrimitiveBuilder, StringArray,
+    StringBuilder, StructArray,
 };
 use arrow::buffer::{Buffer, MutableBuffer};
 use arrow::datatypes::{
@@ -40,7 +40,7 @@ use arrow::datatypes::{
     DurationSecondType as ArrowDurationSecondType, Field,
     Float32Type as ArrowFloat32Type, Float64Type as ArrowFloat64Type,
     Int16Type as ArrowInt16Type, Int32Type as ArrowInt32Type,
-    Int64Type as ArrowInt64Type, Int8Type as ArrowInt8Type, NullableDataType, Schema,
+    Int64Type as ArrowInt64Type, Int8Type as ArrowInt8Type, Schema,
     Time32MillisecondType as ArrowTime32MillisecondType,
     Time32SecondType as ArrowTime32SecondType,
     Time64MicrosecondType as ArrowTime64MicrosecondType,
@@ -305,8 +305,7 @@ impl<T: DataType> ArrayReader for PrimitiveArrayReader<T> {
 
         let array = match T::get_physical_type() {
             PhysicalType::BOOLEAN => {
-                Arc::new(PrimitiveArray::<ArrowBooleanType>::from(array_data.build()))
-                    as ArrayRef
+                Arc::new(BooleanArray::from(array_data.build())) as ArrayRef
             }
             PhysicalType::INT32 => {
                 Arc::new(PrimitiveArray::<ArrowInt32Type>::from(array_data.build()))
@@ -627,7 +626,8 @@ fn build_empty_list_array(item_type: ArrowType) -> Result<ArrayRef> {
             build_empty_list_array_with_primitive_items!(ArrowFloat64Type)
         }
         ArrowType::Boolean => {
-            build_empty_list_array_with_primitive_items!(ArrowBooleanType)
+            //build_empty_list_array_with_primitive_items!(ArrowBooleanType)
+            todo!()
         }
         ArrowType::Date32(_) => {
             build_empty_list_array_with_primitive_items!(ArrowDate32Type)
@@ -772,7 +772,8 @@ fn remove_indices(
             remove_primitive_array_indices!(arr, ArrowFloat64Type, indices)
         }
         ArrowType::Boolean => {
-            remove_primitive_array_indices!(arr, ArrowBooleanType, indices)
+            todo!()
+            //remove_primitive_array_indices!(arr, ArrowBooleanType, indices)
         }
         ArrowType::Date32(_) => {
             remove_primitive_array_indices!(arr, ArrowDate32Type, indices)
@@ -1347,7 +1348,8 @@ impl<'a> TypeVisitor<Option<Box<dyn ArrayReader>>, &'a ArrayReaderBuilderContext
                     .ok()
                     .map(|f| f.data_type().to_owned())
                     .unwrap_or_else(|| {
-                        ArrowType::List(Box::new(NullableDataType::new(
+                        ArrowType::List(Box::new(Field::new(
+                            list_type.name(),
                             item_reader_type.clone(),
                             list_type.is_optional(),
                         )))
@@ -1627,7 +1629,7 @@ mod tests {
     };
     use arrow::datatypes::{
         ArrowPrimitiveType, DataType as ArrowType, Date32Type as ArrowDate32, Field,
-        Int32Type as ArrowInt32, Int64Type as ArrowInt64, NullableDataType,
+        Int32Type as ArrowInt32, Int64Type as ArrowInt64,
         Time32MillisecondType as ArrowTime32MillisecondArray,
         Time64MicrosecondType as ArrowTime64MicrosecondArray,
         TimestampMicrosecondType as ArrowTimestampMicrosecondType,
@@ -2310,7 +2312,7 @@ mod tests {
 
         let mut list_array_reader = ListArrayReader::<i32>::new(
             Box::new(item_array_reader),
-            ArrowType::List(Box::new(NullableDataType::new(ArrowType::Int32, false))),
+            ArrowType::List(Box::new(Field::new("item", ArrowType::Int32, true))),
             ArrowType::Int32,
             1,
             1,
@@ -2364,7 +2366,7 @@ mod tests {
 
         let mut list_array_reader = ListArrayReader::<i64>::new(
             Box::new(item_array_reader),
-            ArrowType::LargeList(Box::new(NullableDataType::new(ArrowType::Int32, true))),
+            ArrowType::LargeList(Box::new(Field::new("item", ArrowType::Int32, true))),
             ArrowType::Int32,
             1,
             1,
