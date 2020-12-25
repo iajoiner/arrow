@@ -17,8 +17,7 @@
 
 //! Benchmark derived from TPC-H. This is not an official TPC-H benchmark.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use arrow::datatypes::{DataType, DateUnit, Field, Schema};
@@ -28,9 +27,10 @@ use datafusion::datasource::{CsvFile, MemTable, TableProvider};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::logical_plan::LogicalPlan;
 use datafusion::physical_plan::collect;
-use datafusion::physical_plan::csv::CsvExec;
 use datafusion::prelude::*;
 
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
@@ -81,6 +81,14 @@ struct ConvertOpt {
     /// Output file format: `csv` or `parquet`
     #[structopt(short = "f", long = "format")]
     file_format: String,
+
+    /// Compression to use when writing Parquet files
+    #[structopt(short = "c", long = "compression", default_value = "snappy")]
+    compression: String,
+
+    /// Number of partitions to produce
+    #[structopt(short = "p", long = "partitions", default_value = "1")]
+    partitions: usize,
 }
 
 #[derive(Debug, StructOpt)]
@@ -103,6 +111,8 @@ async fn main() -> Result<()> {
 }
 
 async fn benchmark(opt: BenchmarkOpt) -> Result<()> {
+    env_logger::init();
+
     println!("Running benchmarks with the following options: {:?}", opt);
     let config = ExecutionConfig::new()
         .with_concurrency(opt.concurrency)
@@ -130,18 +140,19 @@ async fn benchmark(opt: BenchmarkOpt) -> Result<()> {
         }
     }
 
+    let mut millis = vec![];
     // run benchmark
     for i in 0..opt.iterations {
         let start = Instant::now();
         let plan = create_logical_plan(&mut ctx, opt.query)?;
         execute_query(&mut ctx, &plan, opt.debug).await?;
-        println!(
-            "Query {} iteration {} took {} ms",
-            opt.query,
-            i,
-            start.elapsed().as_millis()
-        );
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        millis.push(elapsed as f64);
+        println!("Query {} iteration {} took {:.1} ms", opt.query, i, elapsed);
     }
+
+    let avg = millis.iter().sum::<f64>() / millis.len() as f64;
+    println!("Query {} avg time: {:.2} ms", opt.query, avg);
 
     Ok(())
 }
@@ -996,22 +1007,63 @@ async fn execute_query(
 }
 
 async fn convert_tbl(opt: ConvertOpt) -> Result<()> {
+    let output_root_path = Path::new(&opt.output_path);
+
     for table in TABLES {
+        let start = Instant::now();
         let schema = get_schema(table);
 
-        let path = format!("{}/{}.tbl", opt.input_path.to_str().unwrap(), table);
+        let input_path = format!("{}/{}.tbl", opt.input_path.to_str().unwrap(), table);
         let options = CsvReadOptions::new()
             .schema(&schema)
             .delimiter(b'|')
             .file_extension(".tbl");
 
-        let ctx = ExecutionContext::new();
-        let csv = Arc::new(CsvExec::try_new(&path, options, None, 4096)?);
-        let output_path = opt.output_path.to_str().unwrap().to_owned();
+        let mut ctx = ExecutionContext::new();
 
+        // build plan to read the TBL file
+        let mut csv = ctx.read_csv(&input_path, options)?;
+
+        // optionally, repartition the file
+        if opt.partitions > 1 {
+            csv = csv.repartition(Partitioning::RoundRobinBatch(opt.partitions))?
+        }
+
+        // create the physical plan
+        let csv = csv.to_logical_plan();
+        let csv = ctx.optimize(&csv)?;
+        let csv = ctx.create_physical_plan(&csv)?;
+
+        let output_path = output_root_path.join(table);
+        let output_path = output_path.to_str().unwrap().to_owned();
+
+        println!(
+            "Converting '{}' to {} files in directory '{}'",
+            &input_path, &opt.file_format, &output_path
+        );
         match opt.file_format.as_str() {
             "csv" => ctx.write_csv(csv, output_path).await?,
-            "parquet" => ctx.write_parquet(csv, output_path).await?,
+            "parquet" => {
+                let compression = match opt.compression.as_str() {
+                    "none" => Compression::UNCOMPRESSED,
+                    "snappy" => Compression::SNAPPY,
+                    "brotli" => Compression::BROTLI,
+                    "gzip" => Compression::GZIP,
+                    "lz4" => Compression::LZ4,
+                    "lz0" => Compression::LZO,
+                    "zstd" => Compression::ZSTD,
+                    other => {
+                        return Err(DataFusionError::NotImplemented(format!(
+                            "Invalid compression format: {}",
+                            other
+                        )))
+                    }
+                };
+                let props = WriterProperties::builder()
+                    .set_compression(compression)
+                    .build();
+                ctx.write_parquet(csv, output_path, Some(props)).await?
+            }
             other => {
                 return Err(DataFusionError::NotImplemented(format!(
                     "Invalid output format: {}",
@@ -1019,6 +1071,7 @@ async fn convert_tbl(opt: ConvertOpt) -> Result<()> {
                 )))
             }
         }
+        println!("Conversion completed in {} ms", start.elapsed().as_millis());
     }
 
     Ok(())
@@ -1059,42 +1112,46 @@ fn get_table(
 }
 
 fn get_schema(table: &str) -> Schema {
+    // note that the schema intentionally uses signed integers so that any generated Parquet
+    // files can also be used to benchmark tools that only support signed integers, such as
+    // Apache Spark
+
     match table {
         "part" => Schema::new(vec![
-            Field::new("p_partkey", DataType::UInt32, false),
+            Field::new("p_partkey", DataType::Int32, false),
             Field::new("p_name", DataType::Utf8, false),
             Field::new("p_mfgr", DataType::Utf8, false),
             Field::new("p_brand", DataType::Utf8, false),
             Field::new("p_type", DataType::Utf8, false),
-            Field::new("p_size", DataType::UInt32, false),
+            Field::new("p_size", DataType::Int32, false),
             Field::new("p_container", DataType::Utf8, false),
             Field::new("p_retailprice", DataType::Float64, false), // decimal
             Field::new("p_comment", DataType::Utf8, false),
         ]),
 
         "supplier" => Schema::new(vec![
-            Field::new("s_suppkey", DataType::UInt32, false),
+            Field::new("s_suppkey", DataType::Int32, false),
             Field::new("s_name", DataType::Utf8, false),
             Field::new("s_address", DataType::Utf8, false),
-            Field::new("s_nationkey", DataType::UInt32, false),
+            Field::new("s_nationkey", DataType::Int32, false),
             Field::new("s_phone", DataType::Utf8, false),
             Field::new("s_acctbal", DataType::Float64, false), // decimal
             Field::new("s_comment", DataType::Utf8, false),
         ]),
 
         "partsupp" => Schema::new(vec![
-            Field::new("ps_partkey", DataType::UInt32, false),
-            Field::new("ps_suppkey", DataType::UInt32, false),
-            Field::new("ps_availqty", DataType::UInt32, false),
+            Field::new("ps_partkey", DataType::Int32, false),
+            Field::new("ps_suppkey", DataType::Int32, false),
+            Field::new("ps_availqty", DataType::Int32, false),
             Field::new("ps_supplycost", DataType::Float64, false), // decimal
             Field::new("ps_comment", DataType::Utf8, false),
         ]),
 
         "customer" => Schema::new(vec![
-            Field::new("c_custkey", DataType::UInt32, false),
+            Field::new("c_custkey", DataType::Int32, false),
             Field::new("c_name", DataType::Utf8, false),
             Field::new("c_address", DataType::Utf8, false),
-            Field::new("c_nationkey", DataType::UInt32, false),
+            Field::new("c_nationkey", DataType::Int32, false),
             Field::new("c_phone", DataType::Utf8, false),
             Field::new("c_acctbal", DataType::Float64, false), // decimal
             Field::new("c_mktsegment", DataType::Utf8, false),
@@ -1102,22 +1159,22 @@ fn get_schema(table: &str) -> Schema {
         ]),
 
         "orders" => Schema::new(vec![
-            Field::new("o_orderkey", DataType::UInt32, false),
-            Field::new("o_custkey", DataType::UInt32, false),
+            Field::new("o_orderkey", DataType::Int32, false),
+            Field::new("o_custkey", DataType::Int32, false),
             Field::new("o_orderstatus", DataType::Utf8, false),
             Field::new("o_totalprice", DataType::Float64, false), // decimal
             Field::new("o_orderdate", DataType::Date32(DateUnit::Day), false),
             Field::new("o_orderpriority", DataType::Utf8, false),
             Field::new("o_clerk", DataType::Utf8, false),
-            Field::new("o_shippriority", DataType::UInt32, false),
+            Field::new("o_shippriority", DataType::Int32, false),
             Field::new("o_comment", DataType::Utf8, false),
         ]),
 
         "lineitem" => Schema::new(vec![
-            Field::new("l_orderkey", DataType::UInt32, false),
-            Field::new("l_partkey", DataType::UInt32, false),
-            Field::new("l_suppkey", DataType::UInt32, false),
-            Field::new("l_linenumber", DataType::UInt32, false),
+            Field::new("l_orderkey", DataType::Int32, false),
+            Field::new("l_partkey", DataType::Int32, false),
+            Field::new("l_suppkey", DataType::Int32, false),
+            Field::new("l_linenumber", DataType::Int32, false),
             Field::new("l_quantity", DataType::Float64, false), // decimal
             Field::new("l_extendedprice", DataType::Float64, false), // decimal
             Field::new("l_discount", DataType::Float64, false), // decimal
@@ -1133,14 +1190,14 @@ fn get_schema(table: &str) -> Schema {
         ]),
 
         "nation" => Schema::new(vec![
-            Field::new("n_nationkey", DataType::UInt32, false),
+            Field::new("n_nationkey", DataType::Int32, false),
             Field::new("n_name", DataType::Utf8, false),
-            Field::new("n_regionkey", DataType::UInt32, false),
+            Field::new("n_regionkey", DataType::Int32, false),
             Field::new("n_comment", DataType::Utf8, false),
         ]),
 
         "region" => Schema::new(vec![
-            Field::new("r_regionkey", DataType::UInt32, false),
+            Field::new("r_regionkey", DataType::Int32, false),
             Field::new("r_name", DataType::Utf8, false),
             Field::new("r_comment", DataType::Utf8, false),
         ]),

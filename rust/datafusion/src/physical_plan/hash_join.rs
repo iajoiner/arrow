@@ -25,6 +25,7 @@ use std::{any::Any, collections::HashSet};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, TryStreamExt};
 use hashbrown::HashMap;
+use tokio::sync::Mutex;
 
 use arrow::array::{make_array, Array, MutableArrayData};
 use arrow::datatypes::DataType;
@@ -53,11 +54,14 @@ type Index = (usize, usize);
 // Note that while this is currently equal to `Index`, the `JoinIndex` is semantically different
 // as a left join may issue None indices, in which case
 type JoinIndex = Option<(usize, usize)>;
+// An index of row uniquely identifying a row in a batch
+type RightIndex = Option<usize>;
+
 // Maps ["on" value] -> [list of indices with this key's value]
 // E.g. [1, 2] -> [(0, 3), (1, 6), (0, 8)] indicates that (column1, column2) = [1, 2] is true
 // for rows 3 and 8 from batch 0 and row 6 from batch 1.
 type JoinHashMap = HashMap<Vec<u8>, Vec<Index>, RandomState>;
-type JoinLeftData = (JoinHashMap, Vec<RecordBatch>);
+type JoinLeftData = Arc<(JoinHashMap, Vec<RecordBatch>)>;
 
 /// join execution plan executes partitions in parallel and combines them into a set of
 /// partitions.
@@ -73,6 +77,8 @@ pub struct HashJoinExec {
     join_type: JoinType,
     /// The schema once the join is applied
     schema: SchemaRef,
+    /// Build-side
+    build_side: Arc<Mutex<Option<JoinLeftData>>>,
 }
 
 impl HashJoinExec {
@@ -105,8 +111,9 @@ impl HashJoinExec {
             left,
             right,
             on,
-            join_type: join_type.clone(),
+            join_type: *join_type,
             schema,
+            build_side: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -147,48 +154,59 @@ impl ExecutionPlan for HashJoinExec {
     }
 
     async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
-        // merge all parts into a single stream
-        // this is currently expensive as we re-compute this for every part from the right
-        // TODO: Fix this issue: we can't share this state across parts on the right.
-        // We need to change this `execute` to allow sharing state across parts...
-        let merge = MergeExec::new(self.left.clone());
-        let stream = merge.execute(0).await?;
+        // we only want to compute the build side once
+        let left_data = {
+            let mut build_side = self.build_side.lock().await;
+            match build_side.as_ref() {
+                Some(stream) => stream.clone(),
+                None => {
+                    // merge all left parts into a single stream
+                    let merge = MergeExec::new(self.left.clone());
+                    let stream = merge.execute(0).await?;
 
-        let on_left = self
-            .on
-            .iter()
-            .map(|on| on.0.clone())
-            .collect::<HashSet<_>>();
+                    let on_left = self
+                        .on
+                        .iter()
+                        .map(|on| on.0.clone())
+                        .collect::<HashSet<_>>();
+
+                    // This operation performs 2 steps at once:
+                    // 1. creates a [JoinHashMap] of all batches from the stream
+                    // 2. stores the batches in a vector.
+                    let initial = (JoinHashMap::default(), Vec::new(), 0);
+                    let left_data = stream
+                        .try_fold(initial, |mut acc, batch| async {
+                            let hash = &mut acc.0;
+                            let values = &mut acc.1;
+                            let index = acc.2;
+                            update_hash(&on_left, &batch, hash, index).unwrap();
+                            values.push(batch);
+                            acc.2 += 1;
+                            Ok(acc)
+                        })
+                        .await?;
+
+                    let left_side = Arc::new((left_data.0, left_data.1));
+                    *build_side = Some(left_side.clone());
+                    left_side
+                }
+            }
+        };
+
+        // we have the batches and the hash map with their keys. We can how create a stream
+        // over the right that uses this information to issue new batches.
+
+        let stream = self.right.execute(partition).await?;
         let on_right = self
             .on
             .iter()
             .map(|on| on.1.clone())
             .collect::<HashSet<_>>();
-
-        // This operation performs 2 steps at once:
-        // 1. creates a [JoinHashMap] of all batches from the stream
-        // 2. stores the batches in a vector.
-        let initial = (JoinHashMap::default(), Vec::new(), 0);
-        let left_data = stream
-            .try_fold(initial, |mut acc, batch| async {
-                let hash = &mut acc.0;
-                let values = &mut acc.1;
-                let index = acc.2;
-                update_hash(&on_left, &batch, hash, index).unwrap();
-                values.push(batch);
-                acc.2 += 1;
-                Ok(acc)
-            })
-            .await?;
-        // we have the batches and the hash map with their keys. We can how create a stream
-        // over the right that uses this information to issue new batches.
-
-        let stream = self.right.execute(partition).await?;
         Ok(Box::pin(HashJoinStream {
             schema: self.schema.clone(),
             on_right,
-            join_type: self.join_type.clone(),
-            left_data: (left_data.0, left_data.1),
+            join_type: self.join_type,
+            left_data,
             right: stream,
         }))
     }
@@ -252,7 +270,7 @@ fn build_batch_from_indices(
     left: &Vec<RecordBatch>,
     right: &RecordBatch,
     join_type: &JoinType,
-    indices: &[(JoinIndex, JoinIndex)],
+    indices: &[(JoinIndex, RightIndex)],
 ) -> ArrowResult<RecordBatch> {
     if left.is_empty() {
         todo!("Create empty record batch");
@@ -306,7 +324,7 @@ fn build_batch_from_indices(
             // use the right indices
             for (_, join_index) in indices {
                 match join_index {
-                    Some((batch, row)) => mutable.extend(*batch, *row, *row + 1),
+                    Some(row) => mutable.extend(0, *row, *row + 1),
                     None => mutable.extend_nulls(1),
                 }
             }
@@ -385,11 +403,7 @@ fn build_batch(
     join_type: &JoinType,
     schema: &Schema,
 ) -> ArrowResult<RecordBatch> {
-    let mut right_hash =
-        JoinHashMap::with_capacity_and_hasher(batch.num_rows(), RandomState::new());
-    update_hash(on_right, batch, &mut right_hash, 0).unwrap();
-
-    let indices = build_join_indexes(&left_data.0, &right_hash, join_type).unwrap();
+    let indices = build_join_indexes(&left_data.0, &batch, join_type, on_right).unwrap();
 
     build_batch_from_indices(schema, &left_data.1, &batch, join_type, &indices)
 }
@@ -423,71 +437,83 @@ fn build_batch(
 // (1, 0)     (1, 2)
 fn build_join_indexes(
     left: &JoinHashMap,
-    right: &JoinHashMap,
+    right: &RecordBatch,
     join_type: &JoinType,
-) -> Result<Vec<(JoinIndex, JoinIndex)>> {
+    right_on: &HashSet<String>,
+) -> Result<Vec<(JoinIndex, RightIndex)>> {
+    let keys_values = right_on
+        .iter()
+        .map(|name| Ok(col(name).evaluate(right)?.into_array(right.num_rows())))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut key = Vec::with_capacity(keys_values.len());
+
     match join_type {
         JoinType::Inner => {
-            // inner => key intersection
-            // unfortunately rust does not support intersection of map keys :(
-            let left_set: HashSet<Vec<u8>> = left.keys().cloned().collect();
-            let left_right: HashSet<Vec<u8>> = right.keys().cloned().collect();
-            let inner = left_set.intersection(&left_right);
-
             let mut indexes = Vec::new(); // unknown a prior size
-            for key in inner {
-                // the unwrap never happens by construction of the key
-                let left_indexes = left.get(key).unwrap();
-                let right_indexes = right.get(key).unwrap();
+
+            // Visit all of the right rows
+            for row in 0..right.num_rows() {
+                // Get the key and find it in the build index
+                create_key(&keys_values, row, &mut key)?;
+                let left_indexes = left.get(&key);
 
                 // for every item on the left and right with this key, add the respective pair
-                left_indexes.iter().for_each(|x| {
-                    right_indexes.iter().for_each(|y| {
-                        // on an inner join, left and right indices are present
-                        indexes.push((Some(*x), Some(*y)));
-                    })
+                left_indexes.unwrap_or(&vec![]).iter().for_each(|x| {
+                    // on an inner join, left and right indices are present
+                    indexes.push((Some(*x), Some(row)));
                 })
             }
             Ok(indexes)
         }
         JoinType::Left => {
-            // left => left keys
             let mut indexes = Vec::new(); // unknown a prior size
-            for (key, left_indexes) in left {
-                // for every item on the left and right with this key, add the respective pair
-                if let Some(right_indexes) = right.get(key) {
-                    left_indexes.iter().for_each(|x| {
-                        right_indexes.iter().for_each(|y| {
-                            // on an inner join, left and right indices are present
-                            indexes.push((Some(*x), Some(*y)));
-                        })
+
+            // Keep track of which item is visited in the build input
+            // TODO: this can be stored more efficiently with a marker
+            let mut is_visited = HashSet::new();
+
+            // First visit all of the rows
+            for row in 0..right.num_rows() {
+                create_key(&keys_values, row, &mut key)?;
+                let left_indexes = left.get(&key);
+
+                if let Some(indices) = left_indexes {
+                    is_visited.insert(key.clone());
+
+                    indices.iter().for_each(|x| {
+                        indexes.push((Some(*x), Some(row)));
                     })
-                } else {
-                    // key not on the right => push Nones
-                    left_indexes.iter().for_each(|x| {
+                };
+            }
+            // Add the remaining left rows to the result set with None on the right side
+            for (key, indices) in left {
+                if !is_visited.contains(key) {
+                    indices.iter().for_each(|x| {
                         indexes.push((Some(*x), None));
-                    })
+                    });
                 }
             }
+
             Ok(indexes)
         }
         JoinType::Right => {
-            // right => right keys
             let mut indexes = Vec::new(); // unknown a prior size
-            for (key, right_indexes) in right {
-                // for every item on the left and right with this key, add the respective pair
-                if let Some(left_indexes) = left.get(key) {
-                    left_indexes.iter().for_each(|x| {
-                        right_indexes.iter().for_each(|y| {
-                            // on an inner join, left and right indices are present
-                            indexes.push((Some(*x), Some(*y)));
-                        })
-                    })
-                } else {
-                    // key not on the left => push Nones
-                    right_indexes.iter().for_each(|x| {
-                        indexes.push((None, Some(*x)));
-                    })
+            for row in 0..right.num_rows() {
+                create_key(&keys_values, row, &mut key)?;
+
+                let left_indices = left.get(&key);
+
+                match left_indices {
+                    Some(indices) => {
+                        indices.iter().for_each(|x| {
+                            indexes.push((Some(*x), Some(row)));
+                        });
+                    }
+                    None => {
+                        // when no match, add the row with None for the left side
+                        indexes.push((None, Some(row)));
+                    }
                 }
             }
             Ok(indexes)

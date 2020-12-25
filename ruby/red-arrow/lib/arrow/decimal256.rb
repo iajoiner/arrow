@@ -15,16 +15,46 @@
 # specific language governing permissions and limitations
 # under the License.
 
-ARG base
-FROM ${base}
+module Arrow
+  class Decimal256
+    alias_method :to_s_raw, :to_s
 
-RUN apt-get update && \
-    apt-get install -y -q \
-        libidn11 \
-        wget && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    # @overload to_s
+    #
+    #   @return [String]
+    #     The string representation of the decimal.
+    #
+    # @overload to_s(scale)
+    #
+    #   @param scale [Integer] The scale of the decimal.
+    #   @return [String]
+    #      The string representation of the decimal including the scale.
+    #
+    # @since 3.0.0
+    def to_s(scale=nil)
+      if scale
+        to_string_scale(scale)
+      else
+        to_s_raw
+      end
+    end
 
-ARG cmake=3.2.3
-RUN wget -nv -O - https://github.com/Kitware/CMake/releases/download/v${cmake}/cmake-${cmake}-Linux-x86_64.tar.gz | tar -xzf - -C /opt
-ENV PATH=/opt/cmake-${cmake}-Linux-x86_64/bin:$PATH
+    alias_method :abs!, :abs
+
+    # @since 3.0.0
+    def abs
+      copied = dup
+      copied.abs!
+      copied
+    end
+
+    alias_method :negate!, :negate
+
+    # @since 3.0.0
+    def negate
+      copied = dup
+      copied.negate!
+      copied
+    end
+  end
+end

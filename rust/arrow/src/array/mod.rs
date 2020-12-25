@@ -75,7 +75,7 @@
 //! assert_eq!(2, array.value(2), "Get the value with index 2");
 //!
 //! assert_eq!(
-//!     array.value_slice(3, 2),
+//!     &array.values()[3..5],
 //!     &[3, 4],
 //!     "Get slice of len 2 starting at idx 3"
 //! )
@@ -271,8 +271,8 @@ pub use self::ord::{build_compare, DynComparator};
 // --------------------- Array downcast helper functions ---------------------
 
 pub use self::cast::{
-    as_boolean_array, as_dictionary_array, as_largestring_array, as_null_array,
-    as_primitive_array, as_string_array,
+    as_boolean_array, as_dictionary_array, as_largestring_array, as_list_array,
+    as_null_array, as_primitive_array, as_string_array,
 };
 
 // ------------------------------ C Data Interface ---------------------------

@@ -183,7 +183,7 @@ impl Buffer {
     /// in larger chunks and starting at arbitrary bit offsets.
     /// Note that both `offset` and `length` are measured in bits.
     pub fn bit_chunks(&self, offset: usize, len: usize) -> BitChunks {
-        BitChunks::new(&self, offset, len)
+        BitChunks::new(&self.data.as_slice()[self.offset..], offset, len)
     }
 
     /// Returns the number of 1-bits in this buffer.
@@ -824,7 +824,7 @@ impl MutableBuffer {
     }
 
     /// View buffer as typed slice.
-    pub fn typed_data_mut<T: ArrowNativeType + num::Num>(&mut self) -> &mut [T] {
+    pub fn typed_data_mut<T: ArrowNativeType>(&mut self) -> &mut [T] {
         assert_eq!(self.len() % mem::size_of::<T>(), 0);
         assert!(memory::is_ptr_aligned::<T>(self.raw_data() as *const T));
         unsafe {

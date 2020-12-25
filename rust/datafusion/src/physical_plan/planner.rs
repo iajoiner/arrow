@@ -23,21 +23,22 @@ use super::{aggregates, empty::EmptyExec, expressions::binary, functions, udaf};
 use crate::error::{DataFusionError, Result};
 use crate::execution::context::ExecutionContextState;
 use crate::logical_plan::{
-    DFSchema, Expr, LogicalPlan, Operator, PlanType, StringifiedPlan, TableSource,
-    UserDefinedLogicalNode,
+    DFSchema, Expr, LogicalPlan, Operator, Partitioning as LogicalPartitioning, PlanType,
+    StringifiedPlan, UserDefinedLogicalNode,
 };
 use crate::physical_plan::explain::ExplainExec;
 use crate::physical_plan::expressions::{CaseExpr, Column, Literal, PhysicalSortExpr};
 use crate::physical_plan::filter::FilterExec;
 use crate::physical_plan::hash_aggregate::{AggregateMode, HashAggregateExec};
 use crate::physical_plan::hash_join::HashJoinExec;
-use crate::physical_plan::hash_utils;
 use crate::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use crate::physical_plan::merge::MergeExec;
 use crate::physical_plan::projection::ProjectionExec;
+use crate::physical_plan::repartition::RepartitionExec;
 use crate::physical_plan::sort::SortExec;
 use crate::physical_plan::udf;
 use crate::physical_plan::{expressions, Distribution};
+use crate::physical_plan::{hash_utils, Partitioning};
 use crate::physical_plan::{AggregateExpr, ExecutionPlan, PhysicalExpr, PhysicalPlanner};
 use crate::prelude::JoinType;
 use crate::variable::VarType;
@@ -137,22 +138,11 @@ impl DefaultPhysicalPlanner {
 
         match logical_plan {
             LogicalPlan::TableScan {
-                source, projection, ..
-            } => match source {
-                TableSource::FromContext(table_name) => {
-                    match ctx_state.datasources.get(table_name) {
-                        Some(provider) => provider.scan(projection, batch_size),
-                        _ => Err(DataFusionError::Plan(format!(
-                            "No table named {}. Existing tables: {:?}",
-                            table_name,
-                            ctx_state.datasources.keys().collect::<Vec<_>>(),
-                        ))),
-                    }
-                }
-                TableSource::FromProvider(ref provider) => {
-                    provider.scan(projection, batch_size)
-                }
-            },
+                source,
+                projection,
+                filters,
+                ..
+            } => source.scan(projection, batch_size, filters),
             LogicalPlan::Aggregate {
                 input,
                 group_expr,
@@ -239,6 +229,31 @@ impl DefaultPhysicalPlanner {
                     self.create_physical_expr(predicate, &input_schema, ctx_state)?;
                 Ok(Arc::new(FilterExec::try_new(runtime_expr, input)?))
             }
+            LogicalPlan::Repartition {
+                input,
+                partitioning_scheme,
+            } => {
+                let input = self.create_physical_plan(input, ctx_state)?;
+                let input_schema = input.schema();
+                let physical_partitioning = match partitioning_scheme {
+                    LogicalPartitioning::RoundRobinBatch(n) => {
+                        Partitioning::RoundRobinBatch(*n)
+                    }
+                    LogicalPartitioning::Hash(expr, n) => {
+                        let runtime_expr = expr
+                            .iter()
+                            .map(|e| {
+                                self.create_physical_expr(e, &input_schema, &ctx_state)
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        Partitioning::Hash(runtime_expr, *n)
+                    }
+                };
+                Ok(Arc::new(RepartitionExec::try_new(
+                    input,
+                    physical_partitioning,
+                )?))
+            }
             LogicalPlan::Sort { expr, input, .. } => {
                 let input = self.create_physical_plan(input, ctx_state)?;
                 let input_schema = input.as_ref().schema();
@@ -285,6 +300,7 @@ impl DefaultPhysicalPlanner {
                     JoinType::Left => hash_utils::JoinType::Left,
                     JoinType::Right => hash_utils::JoinType::Right,
                 };
+
                 Ok(Arc::new(HashJoinExec::try_new(
                     left,
                     right,
