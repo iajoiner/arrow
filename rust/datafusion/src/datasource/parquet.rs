@@ -35,17 +35,19 @@ pub struct ParquetTable {
     path: String,
     schema: SchemaRef,
     statistics: Statistics,
+    max_concurrency: usize,
 }
 
 impl ParquetTable {
     /// Attempt to initialize a new `ParquetTable` from a file path.
-    pub fn try_new(path: &str) -> Result<Self> {
-        let parquet_exec = ParquetExec::try_from_path(path, None, 0)?;
+    pub fn try_new(path: &str, max_concurrency: usize) -> Result<Self> {
+        let parquet_exec = ParquetExec::try_from_path(path, None, 0, 1)?;
         let schema = parquet_exec.schema();
         Ok(Self {
             path: path.to_string(),
             schema,
             statistics: parquet_exec.statistics().to_owned(),
+            max_concurrency,
         })
     }
 }
@@ -72,6 +74,7 @@ impl TableProvider for ParquetTable {
             &self.path,
             projection.clone(),
             batch_size,
+            self.max_concurrency,
         )?))
     }
 
@@ -89,7 +92,6 @@ mod tests {
     };
     use arrow::record_batch::RecordBatch;
     use futures::StreamExt;
-    use std::env;
 
     #[tokio::test]
     async fn read_small_batches() -> Result<()> {
@@ -309,10 +311,9 @@ mod tests {
     }
 
     fn load_table(name: &str) -> Result<Box<dyn TableProvider>> {
-        let testdata =
-            env::var("PARQUET_TEST_DATA").expect("PARQUET_TEST_DATA not defined");
+        let testdata = arrow::util::test_util::parquet_test_data();
         let filename = format!("{}/{}", testdata, name);
-        let table = ParquetTable::try_new(&filename)?;
+        let table = ParquetTable::try_new(&filename, 2)?;
         Ok(Box::new(table))
     }
 

@@ -882,10 +882,7 @@ where
     R::Native: num::NumCast,
 {
     from.iter()
-        .map(|v| match v {
-            Some(v) => num::cast::cast::<T::Native, R::Native>(v),
-            None => None,
-        })
+        .map(|v| v.and_then(num::cast::cast::<T::Native, R::Native>))
         .collect()
 }
 
@@ -923,11 +920,12 @@ where
 }
 
 /// Cast numeric types to Utf8
-fn cast_string_to_numeric<TO>(from: &ArrayRef) -> Result<ArrayRef>
+fn cast_string_to_numeric<T>(from: &ArrayRef) -> Result<ArrayRef>
 where
-    TO: ArrowNumericType,
+    T: ArrowNumericType,
+    <T as ArrowPrimitiveType>::Native: lexical_core::FromLexical,
 {
-    Ok(Arc::new(string_to_numeric_cast::<TO>(
+    Ok(Arc::new(string_to_numeric_cast::<T>(
         from.as_any().downcast_ref::<StringArray>().unwrap(),
     )))
 }
@@ -935,16 +933,14 @@ where
 fn string_to_numeric_cast<T>(from: &StringArray) -> PrimitiveArray<T>
 where
     T: ArrowNumericType,
+    <T as ArrowPrimitiveType>::Native: lexical_core::FromLexical,
 {
     (0..from.len())
         .map(|i| {
             if from.is_null(i) {
                 None
             } else {
-                match from.value(i).parse::<T::Native>() {
-                    Ok(v) => Some(v),
-                    Err(_) => None,
-                }
+                lexical_core::parse(from.value(i).as_bytes()).ok()
             }
         })
         .collect()

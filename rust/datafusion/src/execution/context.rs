@@ -220,7 +220,12 @@ impl ExecutionContext {
     pub fn read_parquet(&mut self, filename: &str) -> Result<Arc<dyn DataFrame>> {
         Ok(Arc::new(DataFrameImpl::new(
             self.state.clone(),
-            &LogicalPlanBuilder::scan_parquet(&filename, None)?.build()?,
+            &LogicalPlanBuilder::scan_parquet(
+                &filename,
+                None,
+                self.state.lock().unwrap().config.concurrency,
+            )?
+            .build()?,
         )))
     }
 
@@ -258,7 +263,10 @@ impl ExecutionContext {
     /// Register a Parquet data source so that it can be referenced from SQL statements
     /// executed against this context.
     pub fn register_parquet(&mut self, name: &str, filename: &str) -> Result<()> {
-        let table = ParquetTable::try_new(&filename)?;
+        let table = ParquetTable::try_new(
+            &filename,
+            self.state.lock().unwrap().config.concurrency,
+        )?;
         self.register_table(name, Box::new(table));
         Ok(())
     }
@@ -492,7 +500,7 @@ impl ExecutionConfig {
     pub fn new() -> Self {
         Self {
             concurrency: num_cpus::get(),
-            batch_size: 4096,
+            batch_size: 32768,
             query_planner: Arc::new(DefaultQueryPlanner {}),
         }
     }
