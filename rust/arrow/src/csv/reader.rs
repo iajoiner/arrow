@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use csv as csv_crate;
 
-use crate::array::{ArrayRef, BooleanArray, PrimitiveArray, StringBuilder};
+use crate::array::{ArrayRef, BooleanArray, PrimitiveArray, StringArray};
 use crate::datatypes::*;
 use crate::error::{ArrowError, Result};
 use crate::record_batch::RecordBatch;
@@ -449,16 +449,19 @@ fn parse(
                 &DataType::Date64(_) => {
                     build_primitive_array::<Date64Type>(line_number, rows, i)
                 }
-                &DataType::Utf8 => {
-                    let mut builder = StringBuilder::new(rows.len());
-                    for row in rows.iter() {
-                        match row.get(i) {
-                            Some(s) => builder.append_value(s).unwrap(),
-                            _ => builder.append(false).unwrap(),
-                        }
-                    }
-                    Ok(Arc::new(builder.finish()) as ArrayRef)
+                &DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                    build_primitive_array::<TimestampMicrosecondType>(
+                        line_number,
+                        rows,
+                        i,
+                    )
                 }
+                &DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                    build_primitive_array::<TimestampNanosecondType>(line_number, rows, i)
+                }
+                &DataType::Utf8 => Ok(Arc::new(
+                    rows.iter().map(|row| row.get(i)).collect::<StringArray>(),
+                ) as ArrayRef),
                 other => Err(ArrowError::ParseError(format!(
                     "Unsupported data type {:?}",
                     other
@@ -532,6 +535,30 @@ impl Parser for Date64Type {
             DataType::Date64(DateUnit::Millisecond) => {
                 let date_time = string.parse::<chrono::NaiveDateTime>().ok()?;
                 Self::Native::from_i64(date_time.timestamp_millis())
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Parser for TimestampNanosecondType {
+    fn parse(string: &str) -> Option<i64> {
+        match Self::DATA_TYPE {
+            DataType::Timestamp(TimeUnit::Nanosecond, None) => {
+                let date_time = string.parse::<chrono::NaiveDateTime>().ok()?;
+                Self::Native::from_i64(date_time.timestamp_nanos())
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Parser for TimestampMicrosecondType {
+    fn parse(string: &str) -> Option<i64> {
+        match Self::DATA_TYPE {
+            DataType::Timestamp(TimeUnit::Microsecond, None) => {
+                let date_time = string.parse::<chrono::NaiveDateTime>().ok()?;
+                Self::Native::from_i64(date_time.timestamp_nanos() / 1000)
             }
             _ => None,
         }

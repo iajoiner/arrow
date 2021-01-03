@@ -291,7 +291,7 @@ impl<T: DataType> ArrayReader for PrimitiveArrayReader<T> {
         if T::get_physical_type() == PhysicalType::BOOLEAN {
             let mut boolean_buffer = BooleanBufferBuilder::new(record_data.len());
 
-            for e in record_data.data() {
+            for e in record_data.as_slice() {
                 boolean_buffer.append(*e > 0);
             }
             record_data = boolean_buffer.finish();
@@ -913,14 +913,14 @@ impl<OffsetSize: OffsetSizeTrait> ArrayReader for ListArrayReader<OffsetSize> {
                 offsets.push(cur_offset)
             }
             if def_levels[i] > 0 {
-                cur_offset = cur_offset + OffsetSize::one();
+                cur_offset += OffsetSize::one();
             }
         }
         offsets.push(cur_offset);
 
         let num_bytes = bit_util::ceil(offsets.len(), 8);
         let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, false);
-        let null_slice = null_buf.data_mut();
+        let null_slice = null_buf.as_slice_mut();
         let mut list_index = 0;
         for i in 0..rep_levels.len() {
             if rep_levels[i] == 0 && def_levels[i] != 0 {
@@ -936,7 +936,7 @@ impl<OffsetSize: OffsetSizeTrait> ArrayReader for ListArrayReader<OffsetSize> {
             .len(offsets.len() - 1)
             .add_buffer(value_offsets)
             .add_child_data(batch_values.data())
-            .null_bit_buffer(null_buf.freeze())
+            .null_bit_buffer(null_buf.into())
             .offset(next_batch_array.offset())
             .build();
 
@@ -1106,7 +1106,7 @@ impl ArrayReader for StructArrayReader {
             })
             .transpose()?;
 
-        self.def_level_buffer = Some(def_level_data_buffer.freeze());
+        self.def_level_buffer = Some(def_level_data_buffer.into());
         self.rep_level_buffer = rep_level_data;
         Ok(Arc::new(StructArray::from(array_data)))
     }

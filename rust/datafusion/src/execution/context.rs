@@ -596,8 +596,8 @@ mod tests {
 
     use super::*;
     use crate::logical_plan::{col, create_udf, sum};
-    use crate::physical_plan::collect;
     use crate::physical_plan::functions::ScalarFunctionImplementation;
+    use crate::physical_plan::{collect, collect_partitioned};
     use crate::test;
     use crate::variable::VarType;
     use crate::{
@@ -683,14 +683,25 @@ mod tests {
         let logical_plan = ctx.optimize(&logical_plan)?;
 
         let physical_plan = ctx.create_physical_plan(&logical_plan)?;
+        println!("{:?}", physical_plan);
 
-        let results = collect(physical_plan).await?;
-
-        // there should be one batch per partition
+        let results = collect_partitioned(physical_plan).await?;
         assert_eq!(results.len(), partition_count);
 
-        let row_count: usize = results.iter().map(|batch| batch.num_rows()).sum();
-        assert_eq!(row_count, 20);
+        // there should be a total of 2 batches with 20 rows because the where clause filters
+        // out results from 2 partitions
+
+        // note that the order of partitions is not deterministic
+        let mut num_batches = 0;
+        let mut num_rows = 0;
+        for partition in &results {
+            for batch in partition {
+                num_batches += 1;
+                num_rows += batch.num_rows();
+            }
+        }
+        assert_eq!(2, num_batches);
+        assert_eq!(20, num_rows);
 
         Ok(())
     }
@@ -1041,6 +1052,57 @@ mod tests {
         let mut rows = test::format_batch(&batch);
         rows.sort();
         assert_eq!(rows, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn group_by_date_trunc() -> Result<()> {
+        let tmp_dir = TempDir::new()?;
+        let mut ctx = ExecutionContext::new();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c2", DataType::UInt64, false),
+            Field::new(
+                "t1",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+        ]));
+
+        // generate a partitioned file
+        for partition in 0..4 {
+            let filename = format!("partition-{}.{}", partition, "csv");
+            let file_path = tmp_dir.path().join(&filename);
+            let mut file = File::create(file_path)?;
+
+            // generate some data
+            for i in 0..10 {
+                let data = format!("{},2020-12-{}T00:00:00.000\n", i, i + 10);
+                file.write_all(data.as_bytes())?;
+            }
+        }
+
+        ctx.register_csv(
+            "test",
+            tmp_dir.path().to_str().unwrap(),
+            CsvReadOptions::new().schema(&schema).has_header(false),
+        )?;
+
+        let results = plan_and_collect(
+            &mut ctx,
+            "SELECT date_trunc('week', t1) as week, SUM(c2) FROM test GROUP BY date_trunc('week', t1)"
+        ).await?;
+        assert_eq!(results.len(), 1);
+
+        let batch = &results[0];
+
+        assert_eq!(field_names(batch), vec!["week", "SUM(c2)"]);
+
+        let expected: Vec<&str> =
+            vec!["2020-12-07T00:00:00,24", "2020-12-14T00:00:00,156"];
+        let mut rows = test::format_batch(&batch);
+        rows.sort();
+        assert_eq!(rows, expected);
+
         Ok(())
     }
 

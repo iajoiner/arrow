@@ -76,12 +76,16 @@ macro_rules! downcast_dict_take {
 /// # Ok(())
 /// # }
 /// ```
-pub fn take(
+pub fn take<IndexType>(
     values: &Array,
-    indices: &UInt32Array,
+    indices: &PrimitiveArray<IndexType>,
     options: Option<TakeOptions>,
-) -> Result<ArrayRef> {
-    take_impl::<UInt32Type>(values, indices, options)
+) -> Result<ArrayRef>
+where
+    IndexType: ArrowNumericType,
+    IndexType::Native: ToPrimitive,
+{
+    take_impl(values, indices, options)
 }
 
 fn take_impl<IndexType>(
@@ -291,7 +295,7 @@ where
         let num_bytes = bit_util::ceil(data_len, 8);
         let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
 
-        let null_slice = null_buf.data_mut();
+        let null_slice = null_buf.as_slice_mut();
 
         for (i, elem) in data.iter_mut().enumerate() {
             let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
@@ -308,11 +312,11 @@ where
             Some(buffer) => Some(buffer_bin_and(
                 buffer,
                 0,
-                &null_buf.freeze(),
+                &null_buf.into(),
                 0,
                 indices.len(),
             )),
-            None => Some(null_buf.freeze()),
+            None => Some(null_buf.into()),
         };
     }
 
@@ -322,7 +326,7 @@ where
         None,
         nulls,
         0,
-        vec![buffer.freeze()],
+        vec![buffer.into()],
         vec![],
     );
     Ok(PrimitiveArray::<T>::from(Arc::new(data)))
@@ -342,7 +346,7 @@ where
     let num_byte = bit_util::ceil(data_len, 8);
     let mut val_buf = MutableBuffer::new(num_byte).with_bitset(num_byte, false);
 
-    let val_slice = val_buf.data_mut();
+    let val_slice = val_buf.as_slice_mut();
 
     let null_count = values.null_count();
 
@@ -363,7 +367,7 @@ where
         nulls = indices.data_ref().null_buffer().cloned();
     } else {
         let mut null_buf = MutableBuffer::new(num_byte).with_bitset(num_byte, true);
-        let null_slice = null_buf.data_mut();
+        let null_slice = null_buf.as_slice_mut();
 
         (0..data_len).try_for_each::<_, Result<()>>(|i| {
             let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
@@ -383,11 +387,11 @@ where
             Some(buffer) => Some(buffer_bin_and(
                 buffer,
                 0,
-                &null_buf.freeze(),
+                &null_buf.into(),
                 0,
                 indices.len(),
             )),
-            None => Some(null_buf.freeze()),
+            None => Some(null_buf.into()),
         };
     }
 
@@ -397,7 +401,7 @@ where
         None,
         nulls,
         0,
-        vec![val_buf.freeze()],
+        vec![val_buf.into()],
         vec![],
     );
     Ok(BooleanArray::from(Arc::new(data)))
@@ -442,7 +446,7 @@ where
         let num_bytes = bit_util::ceil(data_len, 8);
 
         let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
-        let null_slice = null_buf.data_mut();
+        let null_slice = null_buf.as_slice_mut();
 
         for (i, offset) in offsets.iter_mut().skip(1).enumerate() {
             let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
@@ -459,7 +463,7 @@ where
             }
             *offset = length_so_far;
         }
-        nulls = Some(null_buf.freeze());
+        nulls = Some(null_buf.into());
     } else if array.null_count() == 0 {
         for (i, offset) in offsets.iter_mut().skip(1).enumerate() {
             if indices.is_valid(i) {
@@ -480,7 +484,7 @@ where
         let num_bytes = bit_util::ceil(data_len, 8);
 
         let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
-        let null_slice = null_buf.data_mut();
+        let null_slice = null_buf.as_slice_mut();
 
         for (i, offset) in offsets.iter_mut().skip(1).enumerate() {
             let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
@@ -501,15 +505,15 @@ where
 
         nulls = match indices.data_ref().null_buffer() {
             Some(buffer) => {
-                Some(buffer_bin_and(buffer, 0, &null_buf.freeze(), 0, data_len))
+                Some(buffer_bin_and(buffer, 0, &null_buf.into(), 0, data_len))
             }
-            None => Some(null_buf.freeze()),
+            None => Some(null_buf.into()),
         };
     }
 
     let mut data = ArrayData::builder(<OffsetSize as StringOffsetSizeTrait>::DATA_TYPE)
         .len(data_len)
-        .add_buffer(offsets_buffer.freeze())
+        .add_buffer(offsets_buffer.into())
         .add_buffer(Buffer::from(values));
     if let Some(null_buffer) = nulls {
         data = data.null_bit_buffer(null_buffer);
@@ -544,7 +548,7 @@ where
     let num_bytes = bit_util::ceil(indices.len(), 8);
     let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
     {
-        let null_slice = null_buf.data_mut();
+        let null_slice = null_buf.as_slice_mut();
         offsets[..].windows(2).enumerate().for_each(
             |(i, window): (usize, &[OffsetType::Native])| {
                 if window[0] == window[1] {
@@ -559,7 +563,7 @@ where
     // create a new list with taken data and computed null information
     let list_data = ArrayDataBuilder::new(values.data_type().clone())
         .len(indices.len())
-        .null_bit_buffer(null_buf.freeze())
+        .null_bit_buffer(null_buf.into())
         .offset(0)
         .add_child_data(taken.data())
         .add_buffer(value_offsets)
@@ -587,7 +591,7 @@ where
     // determine null count and null buffer, which are a function of `values` and `indices`
     let num_bytes = bit_util::ceil(indices.len(), 8);
     let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
-    let null_slice = null_buf.data_mut();
+    let null_slice = null_buf.as_slice_mut();
 
     for i in 0..indices.len() {
         let index = ToPrimitive::to_usize(&indices.value(i)).ok_or_else(|| {
@@ -600,7 +604,7 @@ where
 
     let list_data = ArrayDataBuilder::new(values.data_type().clone())
         .len(indices.len())
-        .null_bit_buffer(null_buf.freeze())
+        .null_bit_buffer(null_buf.into())
         .offset(0)
         .add_child_data(taken.data())
         .build();

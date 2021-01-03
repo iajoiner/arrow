@@ -163,8 +163,8 @@ impl<T: DataType> RecordReader<T> {
 
             new_buffer.resize(num_bytes);
 
-            let new_def_levels = new_buffer.data_mut();
-            let left_def_levels = &def_levels_buf.data_mut()[new_len..];
+            let new_def_levels = new_buffer.as_slice_mut();
+            let left_def_levels = &def_levels_buf.as_slice_mut()[new_len..];
 
             new_def_levels[0..num_bytes].copy_from_slice(&left_def_levels[0..num_bytes]);
 
@@ -174,7 +174,7 @@ impl<T: DataType> RecordReader<T> {
             None
         };
 
-        Ok(replace(&mut self.def_levels, new_buffer).map(|x| x.freeze()))
+        Ok(replace(&mut self.def_levels, new_buffer).map(|x| x.into()))
     }
 
     /// Return repetition level data.
@@ -190,8 +190,8 @@ impl<T: DataType> RecordReader<T> {
 
             new_buffer.resize(num_bytes);
 
-            let new_rep_levels = new_buffer.data_mut();
-            let left_rep_levels = &rep_levels_buf.data_mut()[new_len..];
+            let new_rep_levels = new_buffer.as_slice_mut();
+            let left_rep_levels = &rep_levels_buf.as_slice_mut()[new_len..];
 
             new_rep_levels[0..num_bytes].copy_from_slice(&left_rep_levels[0..num_bytes]);
 
@@ -202,7 +202,7 @@ impl<T: DataType> RecordReader<T> {
             None
         };
 
-        Ok(replace(&mut self.rep_levels, new_buffer).map(|x| x.freeze()))
+        Ok(replace(&mut self.rep_levels, new_buffer).map(|x| x.into()))
     }
 
     /// Returns currently stored buffer data.
@@ -217,14 +217,14 @@ impl<T: DataType> RecordReader<T> {
 
         new_buffer.resize(num_bytes);
 
-        let new_records = new_buffer.data_mut();
-        let left_records = &mut self.records.data_mut()[new_len..];
+        let new_records = new_buffer.as_slice_mut();
+        let left_records = &mut self.records.as_slice_mut()[new_len..];
 
         new_records[0..num_bytes].copy_from_slice(&left_records[0..num_bytes]);
 
         self.records.resize(new_len);
 
-        Ok(replace(&mut self.records, new_buffer).freeze())
+        Ok(replace(&mut self.records, new_buffer).into())
     }
 
     /// Returns currently stored null bitmap data.
@@ -291,20 +291,20 @@ impl<T: DataType> RecordReader<T> {
 
         // Convert mutable buffer spaces to mutable slices
         let (prefix, values, suffix) =
-            unsafe { self.records.data_mut().align_to_mut::<T::T>() };
+            unsafe { self.records.as_slice_mut().align_to_mut::<T::T>() };
         assert!(prefix.is_empty() && suffix.is_empty());
         let values = &mut values[values_written..];
 
         let def_levels = self.def_levels.as_mut().map(|buf| {
             let (prefix, def_levels, suffix) =
-                unsafe { buf.data_mut().align_to_mut::<i16>() };
+                unsafe { buf.as_slice_mut().align_to_mut::<i16>() };
             assert!(prefix.is_empty() && suffix.is_empty());
             &mut def_levels[values_written..]
         });
 
         let rep_levels = self.rep_levels.as_mut().map(|buf| {
             let (prefix, rep_levels, suffix) =
-                unsafe { buf.data_mut().align_to_mut::<i16>() };
+                unsafe { buf.as_slice_mut().align_to_mut::<i16>() };
             assert!(prefix.is_empty() && suffix.is_empty());
             &mut rep_levels[values_written..]
         });
@@ -317,7 +317,8 @@ impl<T: DataType> RecordReader<T> {
 
         // get new references for the def levels.
         let def_levels = self.def_levels.as_ref().map(|buf| {
-            let (prefix, def_levels, suffix) = unsafe { buf.data().align_to::<i16>() };
+            let (prefix, def_levels, suffix) =
+                unsafe { buf.as_slice().align_to::<i16>() };
             assert!(prefix.is_empty() && suffix.is_empty());
             &def_levels[values_written..]
         });
@@ -370,7 +371,8 @@ impl<T: DataType> RecordReader<T> {
     /// records read.
     fn split_records(&mut self, records_to_read: usize) -> Result<usize> {
         let rep_levels = self.rep_levels.as_ref().map(|buf| {
-            let (prefix, rep_levels, suffix) = unsafe { buf.data().align_to::<i16>() };
+            let (prefix, rep_levels, suffix) =
+                unsafe { buf.as_slice().align_to::<i16>() };
             assert!(prefix.is_empty() && suffix.is_empty());
             rep_levels
         });

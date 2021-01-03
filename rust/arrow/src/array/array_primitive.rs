@@ -29,7 +29,6 @@ use super::array::print_long_array;
 use super::raw_pointer::RawPtrBox;
 use super::*;
 use crate::buffer::{Buffer, MutableBuffer};
-use crate::memory;
 use crate::util::bit_util;
 
 /// Number of seconds in a day
@@ -67,19 +66,6 @@ impl<T: ArrowPrimitiveType> PrimitiveArray<T> {
         self.data.is_empty()
     }
 
-    /// Returns a slice for the given offset and length
-    ///
-    /// Note this doesn't do any bound checking, for performance reason.
-    /// # Safety
-    /// caller must ensure that the passed in offset + len are less than the array len()
-    #[deprecated(note = "Please use values() instead")]
-    pub unsafe fn value_slice(&self, offset: usize, len: usize) -> &[T::Native] {
-        std::slice::from_raw_parts(
-            self.raw_values.get().add(self.data.offset()).add(offset),
-            len,
-        )
-    }
-
     /// Returns a slice of the values of this array
     #[inline]
     pub fn values(&self) -> &[T::Native] {
@@ -88,7 +74,7 @@ impl<T: ArrowPrimitiveType> PrimitiveArray<T> {
         //     buffer bounds/offset is ensured by the ArrayData instance.
         unsafe {
             std::slice::from_raw_parts(
-                self.raw_values.get().add(self.data.offset()),
+                self.raw_values.as_ptr().add(self.data.offset()),
                 self.len(),
             )
         }
@@ -106,7 +92,7 @@ impl<T: ArrowPrimitiveType> PrimitiveArray<T> {
     /// caller must ensure that the passed in offset is less than the array len()
     pub fn value(&self, i: usize) -> T::Native {
         let offset = i + self.offset();
-        unsafe { *self.raw_values.get().add(offset) }
+        unsafe { *self.raw_values.as_ptr().add(offset) }
     }
 }
 
@@ -316,7 +302,7 @@ impl<T: ArrowPrimitiveType, Ptr: Borrow<Option<<T as ArrowPrimitiveType>::Native
 
         let null = vec![0; mem::size_of::<<T as ArrowPrimitiveType>::Native>()];
 
-        let null_slice = null_buf.data_mut();
+        let null_slice = null_buf.as_slice_mut();
         iter.enumerate().for_each(|(i, item)| {
             if let Some(a) = item.borrow() {
                 bit_util::set_bit(null_slice, i);
@@ -330,9 +316,9 @@ impl<T: ArrowPrimitiveType, Ptr: Borrow<Option<<T as ArrowPrimitiveType>::Native
             T::DATA_TYPE,
             data_len,
             None,
-            Some(null_buf.freeze()),
+            Some(null_buf.into()),
             0,
-            vec![val_buf.freeze()],
+            vec![val_buf.into()],
             vec![],
         );
         PrimitiveArray::from(Arc::new(data))
@@ -413,7 +399,7 @@ impl<T: ArrowTimestampType> PrimitiveArray<T> {
 
         {
             let null = vec![0; mem::size_of::<i64>()];
-            let null_slice = null_buf.data_mut();
+            let null_slice = null_buf.as_slice_mut();
             for (i, v) in data.iter().enumerate() {
                 if let Some(n) = v {
                     bit_util::set_bit(null_slice, i);
@@ -427,8 +413,8 @@ impl<T: ArrowTimestampType> PrimitiveArray<T> {
         let array_data =
             ArrayData::builder(DataType::Timestamp(T::get_time_unit(), timezone))
                 .len(data_len)
-                .add_buffer(val_buf.freeze())
-                .null_bit_buffer(null_buf.freeze())
+                .add_buffer(val_buf.into())
+                .null_bit_buffer(null_buf.into())
                 .build();
         PrimitiveArray::from(array_data)
     }
@@ -442,14 +428,11 @@ impl<T: ArrowPrimitiveType> From<ArrayDataRef> for PrimitiveArray<T> {
             1,
             "PrimitiveArray data should contain a single buffer only (values buffer)"
         );
-        let raw_values = data.buffers()[0].raw_data();
-        assert!(
-            memory::is_aligned::<u8>(raw_values, mem::align_of::<T::Native>()),
-            "memory is not aligned"
-        );
+
+        let ptr = data.buffers()[0].as_ptr();
         Self {
             data,
-            raw_values: RawPtrBox::new(raw_values as *const T::Native),
+            raw_values: unsafe { RawPtrBox::new(ptr) },
         }
     }
 }

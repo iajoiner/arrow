@@ -15,12 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-pub mod bit_chunk_iterator;
-pub mod bit_util;
-pub mod display;
-pub mod integration_util;
-#[cfg(feature = "prettyprint")]
-pub mod pretty;
-pub(crate) mod serialization;
-pub mod string_writer;
-pub mod test_util;
+use crate::array::ArrayData;
+
+use super::{Extend, _MutableArrayData};
+
+pub(super) fn build_extend(_: &ArrayData) -> Extend {
+    Box::new(move |_, _, _, _| {})
+}
+
+pub(super) fn extend_nulls(_: &mut _MutableArrayData, _: usize) {}

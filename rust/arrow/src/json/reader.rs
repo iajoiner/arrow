@@ -871,12 +871,12 @@ impl Decoder {
         offsets.push(cur_offset);
         rows.iter().enumerate().for_each(|(i, v)| {
             if let Value::Array(a) = v {
-                cur_offset = cur_offset + OffsetSize::from_usize(a.len()).unwrap();
-                bit_util::set_bit(list_nulls.data_mut(), i);
+                cur_offset += OffsetSize::from_usize(a.len()).unwrap();
+                bit_util::set_bit(list_nulls.as_slice_mut(), i);
             } else if let Value::Null = v {
                 // value is null, not incremented
             } else {
-                cur_offset = cur_offset + OffsetSize::one();
+                cur_offset += OffsetSize::one();
             }
             offsets.push(cur_offset);
         });
@@ -896,11 +896,17 @@ impl Decoder {
                             if let Value::Bool(child) = value {
                                 // if valid boolean, append value
                                 if *child {
-                                    bit_util::set_bit(bool_values.data_mut(), curr_index);
+                                    bit_util::set_bit(
+                                        bool_values.as_slice_mut(),
+                                        curr_index,
+                                    );
                                 }
                             } else {
                                 // null slot
-                                bit_util::unset_bit(bool_nulls.data_mut(), curr_index);
+                                bit_util::unset_bit(
+                                    bool_nulls.as_slice_mut(),
+                                    curr_index,
+                                );
                             }
                             curr_index += 1;
                         });
@@ -908,8 +914,8 @@ impl Decoder {
                 });
                 ArrayData::builder(list_field.data_type().clone())
                     .len(valid_len)
-                    .add_buffer(bool_values.freeze())
-                    .null_bit_buffer(bool_nulls.freeze())
+                    .add_buffer(bool_values.into())
+                    .null_bit_buffer(bool_nulls.into())
                     .build()
             }
             DataType::Int8 => self.read_primitive_list_values::<Int8Type>(rows),
@@ -964,7 +970,10 @@ impl Decoder {
                     .flat_map(|row| {
                         if let Value::Array(values) = row {
                             values.iter().for_each(|_| {
-                                bit_util::set_bit(null_buffer.data_mut(), struct_index);
+                                bit_util::set_bit(
+                                    null_buffer.as_slice_mut(),
+                                    struct_index,
+                                );
                                 struct_index += 1;
                             });
                             values.clone()
@@ -977,7 +986,7 @@ impl Decoder {
                 let arrays =
                     self.build_struct_array(rows.as_slice(), fields.as_slice(), &[])?;
                 let data_type = DataType::Struct(fields.clone());
-                let buf = null_buffer.freeze();
+                let buf = null_buffer.into();
                 ArrayDataBuilder::new(data_type)
                     .len(rows.len())
                     .null_bit_buffer(buf)
@@ -996,7 +1005,7 @@ impl Decoder {
             .len(list_len)
             .add_buffer(Buffer::from(offsets.to_byte_slice()))
             .add_child_data(array_data)
-            .null_bit_buffer(list_nulls.freeze())
+            .null_bit_buffer(list_nulls.into())
             .build();
         Ok(Arc::new(GenericListArray::<OffsetSize>::from(list_data)))
     }
@@ -1115,21 +1124,14 @@ impl Decoder {
                             t
                         ))),
                     },
-                    DataType::Utf8 => {
-                        let mut builder = StringBuilder::new(rows.len());
-                        for row in rows {
-                            if let Some(value) = row.get(field.name()) {
-                                if let Some(str_v) = value.as_str() {
-                                    builder.append_value(str_v)?
-                                } else {
-                                    builder.append(false)?
-                                }
-                            } else {
-                                builder.append(false)?
-                            }
-                        }
-                        Ok(Arc::new(builder.finish()) as ArrayRef)
-                    }
+                    DataType::Utf8 => Ok(Arc::new(
+                        rows.iter()
+                            .map(|row| {
+                                let maybe_value = row.get(field.name());
+                                maybe_value.and_then(|value| value.as_str())
+                            })
+                            .collect::<StringArray>(),
+                    ) as ArrayRef),
                     DataType::List(ref list_field) => {
                         match list_field.data_type() {
                             DataType::Dictionary(ref key_ty, _) => {
@@ -1178,7 +1180,7 @@ impl Decoder {
                             .map(|(i, v)| match v {
                                 // we want the field as an object, if it's not, we treat as null
                                 Some(Value::Object(value)) => {
-                                    bit_util::set_bit(null_buffer.data_mut(), i);
+                                    bit_util::set_bit(null_buffer.as_slice_mut(), i);
                                     Value::Object(value.clone())
                                 }
                                 _ => Value::Object(Default::default()),
@@ -1190,7 +1192,7 @@ impl Decoder {
                         let data_type = DataType::Struct(fields.clone());
                         let data = ArrayDataBuilder::new(data_type)
                             .len(len)
-                            .null_bit_buffer(null_buffer.freeze())
+                            .null_bit_buffer(null_buffer.into())
                             .child_data(arrays.into_iter().map(|a| a.data()).collect())
                             .build();
                         Ok(make_array(data))

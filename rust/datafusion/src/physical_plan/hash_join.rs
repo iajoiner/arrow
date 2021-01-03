@@ -18,8 +18,10 @@
 //! Defines the join plan for executing partitions in parallel and then joining the results
 //! into a set of partitions.
 
-use arrow::array::ArrayRef;
+use arrow::array::{TimestampMicrosecondArray, TimestampNanosecondArray};
+use arrow::{array::ArrayRef, compute};
 use std::sync::Arc;
+use std::time::Instant;
 use std::{any::Any, collections::HashSet};
 
 use async_trait::async_trait;
@@ -28,7 +30,7 @@ use hashbrown::HashMap;
 use tokio::sync::Mutex;
 
 use arrow::array::{make_array, Array, MutableArrayData};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
@@ -47,6 +49,7 @@ use crate::error::{DataFusionError, Result};
 
 use super::{ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream};
 use ahash::RandomState;
+use log::debug;
 
 // An index of (batch, row) uniquely identifying a row in a part.
 type Index = (usize, usize);
@@ -55,7 +58,7 @@ type Index = (usize, usize);
 // as a left join may issue None indices, in which case
 type JoinIndex = Option<(usize, usize)>;
 // An index of row uniquely identifying a row in a batch
-type RightIndex = Option<usize>;
+type RightIndex = Option<u32>;
 
 // Maps ["on" value] -> [list of indices with this key's value]
 // E.g. [1, 2] -> [(0, 3), (1, 6), (0, 8)] indicates that (column1, column2) = [1, 2] is true
@@ -160,6 +163,8 @@ impl ExecutionPlan for HashJoinExec {
             match build_side.as_ref() {
                 Some(stream) => stream.clone(),
                 None => {
+                    let start = Instant::now();
+
                     // merge all left parts into a single stream
                     let merge = MergeExec::new(self.left.clone());
                     let stream = merge.execute(0).await?;
@@ -186,8 +191,18 @@ impl ExecutionPlan for HashJoinExec {
                         })
                         .await?;
 
+                    let num_rows: usize =
+                        left_data.1.iter().map(|batch| batch.num_rows()).sum();
+
                     let left_side = Arc::new((left_data.0, left_data.1));
                     *build_side = Some(left_side.clone());
+
+                    debug!(
+                        "Built build-side of hash join containing {} rows in {} ms",
+                        num_rows,
+                        start.elapsed().as_millis()
+                    );
+
                     left_side
                 }
             }
@@ -208,6 +223,11 @@ impl ExecutionPlan for HashJoinExec {
             join_type: self.join_type,
             left_data,
             right: stream,
+            num_input_batches: 0,
+            num_input_rows: 0,
+            num_output_batches: 0,
+            num_output_rows: 0,
+            join_time: 0,
         }))
     }
 }
@@ -252,6 +272,16 @@ struct HashJoinStream {
     left_data: JoinLeftData,
     /// right
     right: SendableRecordBatchStream,
+    /// number of input batches
+    num_input_batches: usize,
+    /// number of input rows
+    num_input_rows: usize,
+    /// number of batches produced
+    num_output_batches: usize,
+    /// number of rows produced
+    num_output_rows: usize,
+    /// total time for joining probe-side batches to the build-side batches
+    join_time: usize,
 }
 
 impl RecordBatchStream for HashJoinStream {
@@ -275,26 +305,27 @@ fn build_batch_from_indices(
     if left.is_empty() {
         todo!("Create empty record batch");
     }
-    // this is just for symmetry of the code below.
-    let right = vec![right.clone()];
 
-    let (primary_is_left, primary, secondary) = match join_type {
-        JoinType::Inner | JoinType::Left => (true, left, &right),
-        JoinType::Right => (false, &right, left),
+    let (primary_is_left, primary_schema, secondary_schema) = match join_type {
+        JoinType::Inner | JoinType::Left => (true, left[0].schema(), right.schema()),
+        JoinType::Right => (false, right.schema(), left[0].schema()),
     };
 
     // build the columns of the new [RecordBatch]:
     // 1. pick whether the column is from the left or right
     // 2. based on the pick, `take` items from the different recordBatches
     let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(schema.fields().len());
+
+    let right_indices: UInt32Array =
+        indices.iter().map(|(_, join_index)| join_index).collect();
+
     for field in schema.fields() {
         // pick the column (left or right) based on the field name.
-        // Note that we take `.data_ref()` to gather the [ArrayData] of each array.
-        let (is_primary, arrays) = match primary[0].schema().index_of(field.name()) {
-            Ok(i) => Ok((true, primary.iter().map(|batch| batch.column(i).data_ref().as_ref()).collect::<Vec<_>>())),
+        let (is_primary, column_index) = match primary_schema.index_of(field.name()) {
+            Ok(i) => Ok((true, i)),
             Err(_) => {
-                match secondary[0].schema().index_of(field.name()) {
-                    Ok(i) => Ok((false, secondary.iter().map(|batch| batch.column(i).data_ref().as_ref()).collect::<Vec<_>>())),
+                match secondary_schema.index_of(field.name()) {
+                    Ok(i) => Ok((false, i)),
                     _ => Err(DataFusionError::Internal(
                         format!("During execution, the column {} was not found in neither the left or right side of the join", field.name()).to_string()
                     ))
@@ -302,12 +333,17 @@ fn build_batch_from_indices(
             }
         }.map_err(DataFusionError::into_arrow_external_error)?;
 
-        let capacity = arrays.iter().map(|array| array.len()).sum();
-        let mut mutable = MutableArrayData::new(arrays, true, capacity);
-
         let is_left =
             (is_primary && primary_is_left) || (!is_primary && !primary_is_left);
-        if is_left {
+
+        let array = if is_left {
+            // Note that we take `.data_ref()` to gather the [ArrayData] of each array.
+            let arrays = left
+                .iter()
+                .map(|batch| batch.column(column_index).data_ref().as_ref())
+                .collect::<Vec<_>>();
+
+            let mut mutable = MutableArrayData::new(arrays, true, indices.len());
             // use the left indices
             for (join_index, _) in indices {
                 match join_index {
@@ -315,16 +351,12 @@ fn build_batch_from_indices(
                     None => mutable.extend_nulls(1),
                 }
             }
+            make_array(Arc::new(mutable.freeze()))
         } else {
             // use the right indices
-            for (_, join_index) in indices {
-                match join_index {
-                    Some(row) => mutable.extend(0, *row, *row + 1),
-                    None => mutable.extend_nulls(1),
-                }
-            }
+            let array = right.column(column_index);
+            compute::take(array.as_ref(), &right_indices, None)?
         };
-        let array = make_array(Arc::new(mutable.freeze()));
         columns.push(array);
     }
     Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
@@ -372,6 +404,20 @@ pub(crate) fn create_key(
                 let array = col.as_any().downcast_ref::<Int64Array>().unwrap();
                 vec.extend(array.value(row).to_le_bytes().iter());
             }
+            DataType::Timestamp(TimeUnit::Microsecond, None) => {
+                let array = col
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, None) => {
+                let array = col
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .unwrap();
+                vec.extend(array.value(row).to_le_bytes().iter());
+            }
             DataType::Utf8 => {
                 let array = col.as_any().downcast_ref::<StringArray>().unwrap();
                 let value = array.value(row);
@@ -400,7 +446,7 @@ fn build_batch(
 ) -> ArrowResult<RecordBatch> {
     let indices = build_join_indexes(&left_data.0, &batch, join_type, on_right).unwrap();
 
-    build_batch_from_indices(schema, &left_data.1, &batch, join_type, &indices)
+    build_batch_from_indices(schema, &left_data.1, batch, join_type, &indices)
 }
 
 /// returns a vector with (index from left, index from right).
@@ -456,7 +502,7 @@ fn build_join_indexes(
                 // for every item on the left and right with this key, add the respective pair
                 left_indexes.unwrap_or(&vec![]).iter().for_each(|x| {
                     // on an inner join, left and right indices are present
-                    indexes.push((Some(*x), Some(row)));
+                    indexes.push((Some(*x), Some(row as u32)));
                 })
             }
             Ok(indexes)
@@ -477,7 +523,7 @@ fn build_join_indexes(
                     is_visited.insert(key.clone());
 
                     indices.iter().for_each(|x| {
-                        indexes.push((Some(*x), Some(row)));
+                        indexes.push((Some(*x), Some(row as u32)));
                     })
                 };
             }
@@ -502,12 +548,12 @@ fn build_join_indexes(
                 match left_indices {
                     Some(indices) => {
                         indices.iter().for_each(|x| {
-                            indexes.push((Some(*x), Some(row)));
+                            indexes.push((Some(*x), Some(row as u32)));
                         });
                     }
                     None => {
                         // when no match, add the row with None for the left side
-                        indexes.push((None, Some(row)));
+                        indexes.push((None, Some(row as u32)));
                     }
                 }
             }
@@ -526,14 +572,36 @@ impl Stream for HashJoinStream {
         self.right
             .poll_next_unpin(cx)
             .map(|maybe_batch| match maybe_batch {
-                Some(Ok(batch)) => Some(build_batch(
-                    &batch,
-                    &self.left_data,
-                    &self.on_right,
-                    &self.join_type,
-                    &self.schema,
-                )),
-                other => other,
+                Some(Ok(batch)) => {
+                    let start = Instant::now();
+                    let result = build_batch(
+                        &batch,
+                        &self.left_data,
+                        &self.on_right,
+                        &self.join_type,
+                        &self.schema,
+                    );
+                    self.num_input_batches += 1;
+                    self.num_input_rows += batch.num_rows();
+                    if let Ok(ref batch) = result {
+                        self.join_time += start.elapsed().as_millis() as usize;
+                        self.num_output_batches += 1;
+                        self.num_output_rows += batch.num_rows();
+                    }
+                    Some(result)
+                }
+                other => {
+                    debug!(
+                        "Processed {} probe-side input batches containing {} rows and \
+                        produced {} output batches containing {} rows in {} ms",
+                        self.num_input_batches,
+                        self.num_input_rows,
+                        self.num_output_batches,
+                        self.num_output_rows,
+                        self.join_time
+                    );
+                    other
+                }
             })
     }
 }

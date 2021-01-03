@@ -24,9 +24,8 @@ use std::{
 };
 
 use super::{
-    array::print_long_array, raw_pointer::as_aligned_pointer, raw_pointer::RawPtrBox,
-    Array, ArrayData, ArrayDataRef, FixedSizeListArray, GenericBinaryIter,
-    GenericListArray, LargeListArray, ListArray, OffsetSizeTrait,
+    array::print_long_array, raw_pointer::RawPtrBox, Array, ArrayData, ArrayDataRef,
+    FixedSizeListArray, GenericBinaryIter, GenericListArray, OffsetSizeTrait,
 };
 use crate::util::bit_util;
 use crate::{buffer::Buffer, datatypes::ToByteSlice};
@@ -82,7 +81,7 @@ impl<OffsetSize: BinaryOffsetSizeTrait> GenericBinaryArray<OffsetSize> {
 
     #[inline]
     fn value_offset_at(&self, i: usize) -> OffsetSize {
-        unsafe { *self.value_offsets.get().add(i) }
+        unsafe { *self.value_offsets.as_ptr().add(i) }
     }
 
     /// Returns the element at index `i` as a byte slice.
@@ -92,7 +91,7 @@ impl<OffsetSize: BinaryOffsetSizeTrait> GenericBinaryArray<OffsetSize> {
         unsafe {
             let pos = self.value_offset_at(offset);
             std::slice::from_raw_parts(
-                self.value_data.get().offset(pos.to_isize()),
+                self.value_data.as_ptr().offset(pos.to_isize()),
                 (self.value_offset_at(offset + 1) - pos).to_usize().unwrap(),
             )
         }
@@ -105,7 +104,7 @@ impl<OffsetSize: BinaryOffsetSizeTrait> GenericBinaryArray<OffsetSize> {
         let mut length_so_far: OffsetSize = OffsetSize::zero();
         offsets.push(length_so_far);
         for s in &v {
-            length_so_far = length_so_far + OffsetSize::from_usize(s.len()).unwrap();
+            length_so_far += OffsetSize::from_usize(s.len()).unwrap();
             offsets.push(length_so_far);
             values.extend_from_slice(s);
         }
@@ -203,14 +202,12 @@ impl<OffsetSize: BinaryOffsetSizeTrait> From<ArrayDataRef>
             2,
             "BinaryArray data should contain 2 buffers only (offsets and values)"
         );
-        let raw_value_offsets = data.buffers()[0].raw_data();
-        let value_data = data.buffers()[1].raw_data();
+        let offsets = data.buffers()[0].as_ptr();
+        let values = data.buffers()[1].as_ptr();
         Self {
             data,
-            value_offsets: RawPtrBox::new(as_aligned_pointer::<OffsetSize>(
-                raw_value_offsets,
-            )),
-            value_data: RawPtrBox::new(value_data),
+            value_offsets: unsafe { RawPtrBox::new(offsets) },
+            value_data: unsafe { RawPtrBox::new(values) },
         }
     }
 }
@@ -232,14 +229,13 @@ where
         offsets.push(length_so_far);
 
         {
-            let null_slice = null_buf.data_mut();
+            let null_slice = null_buf.as_slice_mut();
 
             for (i, s) in iter.enumerate() {
                 if let Some(s) = s {
                     let s = s.as_ref();
                     bit_util::set_bit(null_slice, i);
-                    length_so_far =
-                        length_so_far + OffsetSize::from_usize(s.len()).unwrap();
+                    length_so_far += OffsetSize::from_usize(s.len()).unwrap();
                     values.extend_from_slice(s);
                 }
                 // always add an element in offsets
@@ -251,7 +247,7 @@ where
             .len(data_len)
             .add_buffer(Buffer::from(offsets.to_byte_slice()))
             .add_buffer(Buffer::from(&values[..]))
-            .null_bit_buffer(null_buf.freeze())
+            .null_bit_buffer(null_buf.into())
             .build();
         Self::from(array_data)
     }
@@ -296,15 +292,9 @@ impl From<Vec<Option<&[u8]>>> for LargeBinaryArray {
     }
 }
 
-impl From<ListArray> for BinaryArray {
-    fn from(v: ListArray) -> Self {
-        BinaryArray::from_list(v)
-    }
-}
-
-impl From<LargeListArray> for LargeBinaryArray {
-    fn from(v: LargeListArray) -> Self {
-        LargeBinaryArray::from_list(v)
+impl<T: BinaryOffsetSizeTrait> From<GenericListArray<T>> for GenericBinaryArray<T> {
+    fn from(v: GenericListArray<T>) -> Self {
+        GenericBinaryArray::<T>::from_list(v)
     }
 }
 
@@ -326,7 +316,7 @@ impl FixedSizeBinaryArray {
         unsafe {
             let pos = self.value_offset_at(offset);
             std::slice::from_raw_parts(
-                self.value_data.get().offset(pos as isize),
+                self.value_data.as_ptr().offset(pos as isize),
                 (self.value_offset_at(offset + 1) - pos) as usize,
             )
         }
@@ -387,7 +377,7 @@ impl From<Vec<Option<Vec<u8>>>> for FixedSizeBinaryArray {
 
         let num_bytes = bit_util::ceil(len, 8);
         let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, false);
-        let null_slice = null_buf.data_mut();
+        let null_slice = null_buf.as_slice_mut();
 
         data.iter().enumerate().for_each(|(i, entry)| {
             if entry.is_some() {
@@ -403,7 +393,7 @@ impl From<Vec<Option<Vec<u8>>>> for FixedSizeBinaryArray {
             DataType::FixedSizeBinary(size as i32),
             len,
             None,
-            Some(null_buf.freeze()),
+            Some(null_buf.into()),
             0,
             vec![Buffer::from(&data)],
             vec![],
@@ -419,14 +409,14 @@ impl From<ArrayDataRef> for FixedSizeBinaryArray {
             1,
             "FixedSizeBinaryArray data should contain 1 buffer only (values)"
         );
-        let value_data = data.buffers()[0].raw_data();
+        let value_data = data.buffers()[0].as_ptr();
         let length = match data.data_type() {
             DataType::FixedSizeBinary(len) => *len,
             _ => panic!("Expected data type to be FixedSizeBinary"),
         };
         Self {
             data,
-            value_data: RawPtrBox::new(value_data),
+            value_data: unsafe { RawPtrBox::new(value_data) },
             length,
         }
     }
@@ -510,7 +500,7 @@ impl DecimalArray {
         let raw_val = unsafe {
             let pos = self.value_offset_at(offset);
             std::slice::from_raw_parts(
-                self.value_data.get().offset(pos as isize),
+                self.value_data.as_ptr().offset(pos as isize),
                 (self.value_offset_at(offset + 1) - pos) as usize,
             )
         };
@@ -583,7 +573,7 @@ impl From<ArrayDataRef> for DecimalArray {
             1,
             "DecimalArray data should contain 1 buffer only (values)"
         );
-        let value_data = data.buffers()[0].raw_data();
+        let values = data.buffers()[0].as_ptr();
         let (precision, scale) = match data.data_type() {
             DataType::Decimal(precision, scale) => (*precision, *scale),
             _ => panic!("Expected data type to be Decimal"),
@@ -591,7 +581,7 @@ impl From<ArrayDataRef> for DecimalArray {
         let length = 16;
         Self {
             data,
-            value_data: RawPtrBox::new(value_data),
+            value_data: unsafe { RawPtrBox::new(values) },
             precision,
             scale,
             length,
@@ -635,7 +625,10 @@ impl Array for DecimalArray {
 
 #[cfg(test)]
 mod tests {
-    use crate::datatypes::Field;
+    use crate::{
+        array::{LargeListArray, ListArray},
+        datatypes::Field,
+    };
 
     use super::*;
 
