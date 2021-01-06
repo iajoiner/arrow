@@ -15,19 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 
-class TestBooleanDataType < Test::Unit::TestCase
-  def test_type
-    data_type = Arrow::BooleanDataType.new
-    assert_equal(Arrow::Type::BOOLEAN, data_type.id)
-  end
-
-  def test_name
-    data_type = Arrow::BooleanDataType.new
-    assert_equal("bool", data_type.name)
-  end
-
-  def test_to_s
-    data_type = Arrow::BooleanDataType.new
-    assert_equal("bool", data_type.to_s)
+module Arrow
+  class FixedSizeBinaryArray
+    alias_method :get_value_raw, :get_value
+    # @since 3.0.0
+    def get_value(i)
+      get_value_raw(i).to_s
+    end
   end
 end
