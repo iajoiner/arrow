@@ -126,6 +126,11 @@ G_BEGIN_DECLS
  * string data. If you don't have Arrow format data, you need to
  * use #GArrowLargeStringArrayBuilder to create a new array.
  *
+ * #GArrowFixedSizeBinaryArray is a class for fixed size binary array.
+ * It can store zero or more fixed size binary data. If you don't have
+ * Arrow format data, you need to use
+ * #GArrowFixedSizeBinaryArrayBuilder to create a new array.
+ *
  * #GArrowDate32Array is a class for the number of days since UNIX
  * epoch in 32-bit signed integer array. It can store zero or more
  * date data. If you don't have Arrow format data, you need to use
@@ -161,6 +166,9 @@ G_BEGIN_DECLS
  * store zero or more 256-bit decimal data. If you don't have Arrow
  * format data, you need to use #GArrowDecimal256ArrayBuilder to
  * create a new array.
+ *
+ * #GArrowExtensionArray is a base class for array of user-defined
+ * extension types.
  */
 
 typedef struct GArrowArrayPrivate_ {
@@ -378,7 +386,6 @@ garrow_array_class_init(GArrowArrayClass *klass)
                              static_cast<GParamFlags>(G_PARAM_READWRITE |
                                                       G_PARAM_CONSTRUCT_ONLY));
   g_object_class_install_property(gobject_class, PROP_PARENT, spec);
-
 }
 
 /**
@@ -2489,6 +2496,97 @@ garrow_fixed_size_binary_array_class_init(GArrowFixedSizeBinaryArrayClass *klass
 {
 }
 
+/**
+ * garrow_fixed_size_binary_array_new:
+ * @data_type: A #GArrowFixedSizeBinaryDataType for the array.
+ * @length: The number of elements.
+ * @data: The binary data in Arrow format of the array.
+ * @null_bitmap: (nullable): The bitmap that shows null elements. The
+ *   N-th element is null when the N-th bit is 0, not null otherwise.
+ *   If the array has no null elements, the bitmap must be %NULL and
+ *   @n_nulls is 0.
+ * @n_nulls: The number of null elements. If -1 is specified, the
+ *   number of nulls are computed from @null_bitmap.
+ *
+ * Returns: A newly created #GArrowFixedSizeBinaryArray.
+ *
+ * Since: 3.0.0
+ */
+GArrowFixedSizeBinaryArray *
+garrow_fixed_size_binary_array_new(GArrowFixedSizeBinaryDataType *data_type,
+                                   gint64 length,
+                                   GArrowBuffer *data,
+                                   GArrowBuffer *null_bitmap,
+                                   gint64 n_nulls)
+{
+  auto array =
+    garrow_primitive_array_new<arrow::FixedSizeBinaryType>(
+      GARROW_DATA_TYPE(data_type),
+      length,
+      data,
+      null_bitmap,
+      n_nulls);
+  return GARROW_FIXED_SIZE_BINARY_ARRAY(array);
+}
+
+/**
+ * garrow_fixed_size_binary_array_get_byte_width:
+ * @array: A #GArrowFixedSizeBinaryArray.
+ *
+ * Returns: The number of bytes of each value.
+ *
+ * Since: 3.0.0
+ */
+gint32
+garrow_fixed_size_binary_array_get_byte_width(GArrowFixedSizeBinaryArray *array)
+{
+  auto arrow_array = garrow_array_get_raw(GARROW_ARRAY(array));
+  auto arrow_binary_array =
+    std::static_pointer_cast<arrow::FixedSizeBinaryArray>(arrow_array);
+  return arrow_binary_array->byte_width();
+}
+
+/**
+ * garrow_fixed_size_binary_array_get_value:
+ * @array: A #GArrowFixedSizeBinaryArray.
+ * @i: The index of the target value.
+ *
+ * Returns: (transfer full): The @i-th value.
+ *
+ * Since: 3.0.0
+ */
+GBytes *
+garrow_fixed_size_binary_array_get_value(GArrowFixedSizeBinaryArray *array,
+                                         gint64 i)
+{
+  auto arrow_array = garrow_array_get_raw(GARROW_ARRAY(array));
+  auto arrow_binary_array =
+    std::static_pointer_cast<arrow::FixedSizeBinaryArray>(arrow_array);
+  auto value = arrow_binary_array->GetValue(i);
+  return g_bytes_new_static(value,
+                            arrow_binary_array->byte_width());
+}
+
+/**
+ * garrow_fixed_size_binary_array_get_values_bytes:
+ * @array: A #GArrowFixedSizeBinaryArray.
+ *
+ * Returns: (transfer full): All values as a #GBytes.
+ *
+ * Since: 3.0.0
+ */
+GBytes *
+garrow_fixed_size_binary_array_get_values_bytes(GArrowFixedSizeBinaryArray *array)
+{
+  auto arrow_array = garrow_array_get_raw(GARROW_ARRAY(array));
+  auto arrow_binary_array =
+    std::static_pointer_cast<arrow::FixedSizeBinaryArray>(arrow_array);
+  auto value = arrow_binary_array->raw_values();
+  return g_bytes_new_static(value,
+                            arrow_binary_array->byte_width() *
+                            arrow_array->length());
+}
+
 
 G_DEFINE_TYPE(GArrowDecimal128Array,
               garrow_decimal128_array,
@@ -2604,6 +2702,118 @@ garrow_decimal256_array_get_value(GArrowDecimal256Array *array,
 }
 
 
+typedef struct GArrowExtensionArrayPrivate_ {
+  GArrowArray *storage;
+} GArrowExtensionArrayPrivate;
+
+enum {
+  PROP_STORAGE = 1
+};
+
+G_DEFINE_TYPE_WITH_PRIVATE(GArrowExtensionArray,
+                           garrow_extension_array,
+                           GARROW_TYPE_ARRAY)
+
+#define GARROW_EXTENSION_ARRAY_GET_PRIVATE(obj)         \
+  static_cast<GArrowExtensionArrayPrivate *>(           \
+    garrow_extension_array_get_instance_private(        \
+      GARROW_EXTENSION_ARRAY(obj)))
+
+static void
+garrow_extension_array_dispose(GObject *object)
+{
+  auto priv = GARROW_EXTENSION_ARRAY_GET_PRIVATE(object);
+
+  if (priv->storage) {
+    g_object_unref(priv->storage);
+    priv->storage = NULL;
+  }
+
+  G_OBJECT_CLASS(garrow_extension_array_parent_class)->dispose(object);
+}
+
+static void
+garrow_extension_array_set_property(GObject *object,
+                                    guint prop_id,
+                                    const GValue *value,
+                                    GParamSpec *pspec)
+{
+  auto priv = GARROW_EXTENSION_ARRAY_GET_PRIVATE(object);
+
+  switch (prop_id) {
+  case PROP_STORAGE:
+    priv->storage = GARROW_ARRAY(g_value_dup_object(value));
+    break;
+  default:
+    G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+    break;
+  }
+}
+
+static void
+garrow_extension_array_get_property(GObject *object,
+                                    guint prop_id,
+                                    GValue *value,
+                                    GParamSpec *pspec)
+{
+  auto priv = GARROW_EXTENSION_ARRAY_GET_PRIVATE(object);
+
+  switch (prop_id) {
+  case PROP_STORAGE:
+    g_value_set_object(value, priv->storage);
+    break;
+  default:
+    G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+    break;
+  }
+}
+
+static void
+garrow_extension_array_init(GArrowExtensionArray *object)
+{
+}
+
+static void
+garrow_extension_array_class_init(GArrowExtensionArrayClass *klass)
+{
+  auto gobject_class = G_OBJECT_CLASS(klass);
+
+  gobject_class->dispose      = garrow_extension_array_dispose;
+  gobject_class->set_property = garrow_extension_array_set_property;
+  gobject_class->get_property = garrow_extension_array_get_property;
+
+  GParamSpec *spec;
+  spec = g_param_spec_object("storage",
+                             "storage",
+                             "The storage array",
+                             GARROW_TYPE_ARRAY,
+                             static_cast<GParamFlags>(G_PARAM_READWRITE |
+                                                      G_PARAM_CONSTRUCT_ONLY));
+  g_object_class_install_property(gobject_class, PROP_STORAGE, spec);
+}
+
+/**
+ * garrow_extension_array_get_storage:
+ * @array: A #GArrowExtensionArray.
+ *
+ * Returns: (transfer full): The underlying storage of the array.
+ *
+ * Since: 3.0.0
+ */
+GArrowArray *
+garrow_extension_array_get_storage(GArrowExtensionArray *array)
+{
+  auto priv = GARROW_EXTENSION_ARRAY_GET_PRIVATE(array);
+  if (priv->storage) {
+    g_object_ref(priv->storage);
+    return priv->storage;
+  }
+
+  auto array_priv = GARROW_ARRAY_GET_PRIVATE(array);
+  return garrow_array_new_raw(&(array_priv->array));
+}
+
+
 G_END_DECLS
 
 GArrowArray *
@@ -2684,6 +2894,9 @@ garrow_array_new_raw_valist(std::shared_ptr<arrow::Array> *arrow_array,
   case arrow::Type::type::LARGE_STRING:
     type = GARROW_TYPE_LARGE_STRING_ARRAY;
     break;
+  case arrow::Type::type::FIXED_SIZE_BINARY:
+    type = GARROW_TYPE_FIXED_SIZE_BINARY_ARRAY;
+    break;
   case arrow::Type::type::DATE32:
     type = GARROW_TYPE_DATE32_ARRAY;
     break;
@@ -2726,6 +2939,18 @@ garrow_array_new_raw_valist(std::shared_ptr<arrow::Array> *arrow_array,
   case arrow::Type::type::DECIMAL256:
     type = GARROW_TYPE_DECIMAL256_ARRAY;
     break;
+  case arrow::Type::type::EXTENSION:
+    {
+      auto arrow_data_type = (*arrow_array)->type();
+      auto arrow_gextension_data_type =
+        std::static_pointer_cast<garrow::GExtensionType>(arrow_data_type);
+      if (arrow_gextension_data_type) {
+        type = arrow_gextension_data_type->array_gtype();
+      } else {
+        type = GARROW_TYPE_EXTENSION_ARRAY;
+      }
+    }
+    break;
   default:
     type = GARROW_TYPE_ARRAY;
     break;
@@ -2733,6 +2958,17 @@ garrow_array_new_raw_valist(std::shared_ptr<arrow::Array> *arrow_array,
   return GARROW_ARRAY(g_object_new_valist(type,
                                           first_property_name,
                                           args));
+}
+
+GArrowExtensionArray *
+garrow_extension_array_new_raw(std::shared_ptr<arrow::Array> *arrow_array,
+                               GArrowArray *storage)
+{
+  auto array = garrow_array_new_raw(arrow_array,
+                                    "array", arrow_array,
+                                    "storage", storage,
+                                    NULL);
+  return GARROW_EXTENSION_ARRAY(array);
 }
 
 std::shared_ptr<arrow::Array>
