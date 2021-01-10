@@ -16,17 +16,17 @@
 // under the License.
 
 #include "arrow/adapters/orc/adapter.h"
-#include "arrow/adapters/orc/adapter_util.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "arrow/adapters/orc/adapter_util.h"
 #include "arrow/buffer.h"
 #include "arrow/builder.h"
 #include "arrow/io/interfaces.h"
@@ -44,19 +44,10 @@
 #include "arrow/util/macros.h"
 #include "arrow/util/range.h"
 #include "arrow/util/visibility.h"
-
 #include "orc/Exceptions.hh"
-#include "orc/OrcFile.hh"
 
 // alias to not interfere with nested orc namespace
 namespace liborc = orc;
-
-namespace arrow {
-
-using internal::checked_cast;
-
-namespace adapters {
-namespace orc {
 
 #define ORC_THROW_NOT_OK(s)                   \
   do {                                        \
@@ -76,6 +67,13 @@ namespace orc {
 #define ORC_ASSIGN_OR_THROW(lhs, rexpr)                                              \
   ORC_ASSIGN_OR_THROW_IMPL(ARROW_ASSIGN_OR_RAISE_NAME(_error_or_value, __COUNTER__), \
                            lhs, rexpr);
+
+namespace arrow {
+
+using internal::checked_cast;
+
+namespace adapters {
+namespace orc {
 
 class ArrowInputFile : public liborc::InputStream {
  public:
@@ -472,6 +470,107 @@ Status ORCFileReader::NextStripeReader(int64_t batch_size,
 int64_t ORCFileReader::NumberOfStripes() { return impl_->NumberOfStripes(); }
 
 int64_t ORCFileReader::NumberOfRows() { return impl_->NumberOfRows(); }
+
+class ArrowOutputStream : public liborc::OutputStream {
+ public:
+  explicit ArrowOutputStream(const std::shared_ptr<io::OutputStream>& output_stream)
+      : output_stream_(output_stream), length_(0) {}
+
+  uint64_t getLength() const override { return length_; }
+
+  uint64_t getNaturalWriteSize() const override { return 128 * 1024; }
+
+  void write(const void* buf, size_t length) override {
+    ORC_THROW_NOT_OK(output_stream_->Write(buf, static_cast<int64_t>(length)));
+    length_ += static_cast<int64_t>(length);
+  }
+
+  const std::string& getName() const override {
+    static const std::string filename("ArrowOutputFile");
+    return filename;
+  }
+
+  void close() override {
+    if (!output_stream_->closed()) {
+      ORC_THROW_NOT_OK(output_stream_->Close());
+    }
+  }
+
+  int64_t get_length() { return length_; }
+
+  void set_length(int64_t length) { length_ = length; }
+
+ private:
+  std::shared_ptr<io::OutputStream> output_stream_;
+  int64_t length_;
+};
+
+class ORCFileWriter::Impl {
+ public:
+  Status Open(const std::shared_ptr<Schema>& schema,
+              const std::shared_ptr<io::OutputStream>& output_stream) {
+    orc_options_ = std::make_shared<liborc::WriterOptions>();
+    outStream_ = ORC_UNIQUE_PTR<liborc::OutputStream>(
+        static_cast<liborc::OutputStream*>(new ArrowOutputStream(output_stream)));
+    ORC_THROW_NOT_OK(GetORCType(schema.get(), &orcSchema_));
+    try {
+      writer_ = createWriter(*orcSchema_, outStream_.get(), *orc_options_);
+    } catch (const liborc::ParseError& e) {
+      return Status::IOError(e.what());
+    }
+    schema_ = schema;
+    num_cols_ = schema->num_fields();
+    return Status::OK();
+  }
+  Status Write(const std::shared_ptr<Table> table) {
+    int64_t numRows = table->num_rows();
+    int64_t batch_size = 1024;  // Doesn't matter what it is
+    std::vector<int64_t> arrowIndexOffset(num_cols_, 0);
+    std::vector<int> arrowChunkOffset(num_cols_, 0);
+    ORC_UNIQUE_PTR<liborc::ColumnVectorBatch> batch = writer_->createRowBatch(batch_size);
+    liborc::StructVectorBatch* root =
+        internal::checked_cast<liborc::StructVectorBatch*>(batch.get());
+    std::vector<liborc::ColumnVectorBatch*> fields = root->fields;
+    while (numRows > 0) {
+      for (int i = 0; i < num_cols_; i++) {
+        ORC_THROW_NOT_OK(adapters::orc::FillBatch(
+            schema_->field(i)->type().get(), fields[i], arrowIndexOffset[i],
+            arrowChunkOffset[i], batch_size, table->column(i).get()));
+      }
+      root->numElements = fields[0]->numElements;
+      writer_->add(*batch);
+      batch->clear();
+      numRows -= batch_size;
+    }
+    writer_->close();
+    return Status::OK();
+  }
+
+ private:
+  ORC_UNIQUE_PTR<liborc::Writer> writer_;
+  std::shared_ptr<liborc::WriterOptions> orc_options_;
+  std::shared_ptr<Schema> schema_;
+  ORC_UNIQUE_PTR<liborc::OutputStream> outStream_;
+  ORC_UNIQUE_PTR<liborc::Type> orcSchema_;
+  int num_cols_;
+};
+
+ORCFileWriter::~ORCFileWriter() {}
+
+ORCFileWriter::ORCFileWriter() { impl_.reset(new ORCFileWriter::Impl()); }
+
+Status ORCFileWriter::Open(const std::shared_ptr<Schema>& schema,
+                           const std::shared_ptr<io::OutputStream>& output_stream,
+                           std::unique_ptr<ORCFileWriter>* writer) {
+  auto result = std::unique_ptr<ORCFileWriter>(new ORCFileWriter());
+  ORC_THROW_NOT_OK(result->impl_->Open(schema, output_stream));
+  *writer = std::move(result);
+  return Status::OK();
+}
+
+Status ORCFileWriter::Write(const std::shared_ptr<Table> table) {
+  return impl_->Write(table);
+}
 
 }  // namespace orc
 }  // namespace adapters

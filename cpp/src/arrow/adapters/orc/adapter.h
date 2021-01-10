@@ -19,12 +19,16 @@
 
 #include <cstdint>
 #include <memory>
+#include <sstream>
 #include <vector>
 
+#include "arrow/io/file.h"
 #include "arrow/io/interfaces.h"
 #include "arrow/memory_pool.h"
 #include "arrow/record_batch.h"
 #include "arrow/status.h"
+#include "arrow/table.h"
+#include "arrow/table_builder.h"
 #include "arrow/type.h"
 #include "arrow/util/visibility.h"
 
@@ -140,6 +144,35 @@ class ARROW_EXPORT ORCFileReader {
   class Impl;
   std::unique_ptr<Impl> impl_;
   ORCFileReader();
+};
+
+/// \class ORCFileWriter
+/// \brief Write an Arrow Table or RecordBatch to an ORC file.
+class ARROW_EXPORT ORCFileWriter {
+ public:
+  ~ORCFileWriter();
+  /// \brief Creates a new ORC writer.
+  ///
+  /// \param[in] schema of the Arrow table
+  /// \param[in] output_stream the io::OutputStream to write into
+  /// \param[out] writer the returned writer object
+  /// \return Status
+  static Status Open(const std::shared_ptr<Schema>& schema,
+                     const std::shared_ptr<io::OutputStream>& output_stream,
+                     std::unique_ptr<ORCFileWriter>* writer);
+
+  /// \brief Write a table
+  ///
+  /// \param[in] table the Arrow table from which data is extracted
+  /// \return Status
+  Status Write(const std::shared_ptr<Table> table);
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+
+ private:
+  ORCFileWriter();
 };
 
 }  // namespace orc
