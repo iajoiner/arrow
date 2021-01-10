@@ -690,6 +690,30 @@ Status FillMapBatch(const DataType* type, liborc::ColumnVectorBatch* cbatch,
   return Status::OK();
 }
 
+template <class index_array_type>
+Status FillDictionaryBatch(const DataType* type, liborc::ColumnVectorBatch* cbatch,
+                           int64_t& arrowOffset, int64_t& orcOffset, int64_t length,
+                           Array* parray, std::vector<bool>* incomingMask) {
+  auto array = checked_cast<DictionaryArray*>(parray);
+  int64_t arrowLength = array->length();
+  if (!arrowLength) return Status::OK();
+  if (array->null_count() || incomingMask) batch->hasNulls = true;
+  for (; orcOffset < length && arrowOffset < arrowLength; orcOffset++, arrowOffset++) {
+    if (array->IsNull(arrowOffset) || (incomingMask && !(*incomingMask)[orcOffset])) {
+      batch->notNull[orcOffset] = false;
+    } else {
+      batch->notNull[orcOffset] = true;
+      auto index = static_cast<index_array_type>(array->indices())->Value(arrowOffset);
+      int64_t constructedArrowOffset = 0;
+      RETURN_NOT_OK(FillBatch(array->dictionary()->type(), cbatch, constructedArrowOffset,
+                              orcOffset, 1, array->dictionary()->Slice(index, 1),
+                              NULLPTR));
+    }
+  }
+  batch->numElements = orcOffset;
+  return Status::OK();
+}
+
 Status FillBatch(const DataType* type, liborc::ColumnVectorBatch* cbatch,
                  int64_t& arrowOffset, int64_t& orcOffset, int64_t length, Array* parray,
                  std::vector<bool>* incomingMask) {
@@ -771,6 +795,39 @@ Status FillBatch(const DataType* type, liborc::ColumnVectorBatch* cbatch,
     case Type::type::MAP:
       return FillMapBatch(type, cbatch, arrowOffset, orcOffset, length, parray,
                           incomingMask);
+    case Type::type::DICTIONARY: {
+      switch (parray->indices()->type()->id()) {
+        case Type::type::INT8:
+          return FillDictionaryBatch<NumericArray<arrow::Int8Type>>(
+              type, cbatch, arrowOffset, orcOffset, length, parray, incomingMask);
+        case Type::type::UINT8:
+          return FillDictionaryBatch<NumericArray<arrow::UInt8Type>>(
+              type, cbatch, arrowOffset, orcOffset, length, parray, incomingMask);
+        case Type::type::INT16:
+          return FillDictionaryBatch<NumericArray<arrow::Int16Type>>(
+              type, cbatch, arrowOffset, orcOffset, length, parray, incomingMask);
+        case Type::type::UINT16:
+          return FillDictionaryBatch<NumericArray<arrow::UInt16Type>>(
+              type, cbatch, arrowOffset, orcOffset, length, parray, incomingMask);
+        case Type::type::INT32:
+          return FillDictionaryBatch<NumericArray<arrow::Int32Type>>(
+              type, cbatch, arrowOffset, orcOffset, length, parray, incomingMask);
+        case Type::type::UINT32:
+          return FillDictionaryBatch<NumericArray<arrow::UInt32Type>>(
+              type, cbatch, arrowOffset, orcOffset, length, parray, incomingMask);
+        case Type::type::INT64:
+          return FillDictionaryBatch<NumericArray<arrow::Int64Type>>(
+              type, cbatch, arrowOffset, orcOffset, length, parray, incomingMask);
+        case Type::type::UINT64:
+          return FillDictionaryBatch<NumericArray<arrow::UInt64Type>>(
+              type, cbatch, arrowOffset, orcOffset, length, parray, incomingMask);
+        default: {
+          return Status::Invalid(
+              "Unknown or unsupported Arrow index type kind for dictionary arrays: ",
+              parray->indices()->type()->id());
+        }
+      }
+    }
     default: {
       return Status::Invalid("Unknown or unsupported Arrow type kind: ", kind);
     }
@@ -1014,11 +1071,11 @@ Status GetORCType(const DataType* type, ORC_UNIQUE_PTR<liborc::Type>* out) {
     }
     // Dictionary is an encoding method, not a TypeKind in ORC. Hence we need to get the
     // actual value type.
-    // case Type::type::DICTIONARY: {
-    //   DataType* arrowValueType =
-    //       checked_cast<const DictionaryType*>(type)->dictionary()->type().get();
-    //   RETURN_NOT_OK(GetORCType(arrowValueType, std::move(out)));
-    // }
+    case Type::type::DICTIONARY: {
+      DataType* arrowValueType =
+          checked_cast<const DictionaryType*>(type)->dictionary()->type().get();
+      RETURN_NOT_OK(GetORCType(arrowValueType, std::move(out)));
+    }
     default: {
       return Status::Invalid("Unknown or unsupported Arrow type kind: ", kind);
     }
