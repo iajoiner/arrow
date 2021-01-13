@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "arrow/array/array_dict.h"
 #include "arrow/array/builder_base.h"
 #include "arrow/builder.h"
 #include "arrow/chunked_array.h"
@@ -694,23 +695,24 @@ template <class index_array_type>
 Status FillDictionaryBatch(const DataType* type, liborc::ColumnVectorBatch* cbatch,
                            int64_t& arrowOffset, int64_t& orcOffset, int64_t length,
                            Array* parray, std::vector<bool>* incomingMask) {
-  auto array = checked_cast<DictionaryArray*>(parray);
+  DictionaryArray* array = checked_cast<DictionaryArray*>(parray);
   int64_t arrowLength = array->length();
   if (!arrowLength) return Status::OK();
-  if (array->null_count() || incomingMask) batch->hasNulls = true;
+  if (array->null_count() || incomingMask) cbatch->hasNulls = true;
   for (; orcOffset < length && arrowOffset < arrowLength; orcOffset++, arrowOffset++) {
     if (array->IsNull(arrowOffset) || (incomingMask && !(*incomingMask)[orcOffset])) {
-      batch->notNull[orcOffset] = false;
+      cbatch->notNull[orcOffset] = false;
     } else {
-      batch->notNull[orcOffset] = true;
-      auto index = static_cast<index_array_type>(array->indices())->Value(arrowOffset);
+      cbatch->notNull[orcOffset] = true;
+      auto index = std::static_pointer_cast<index_array_type>(array->indices())
+                       ->Value(arrowOffset);
       int64_t constructedArrowOffset = 0;
-      RETURN_NOT_OK(FillBatch(array->dictionary()->type(), cbatch, constructedArrowOffset,
-                              orcOffset, 1, array->dictionary()->Slice(index, 1),
-                              NULLPTR));
+      RETURN_NOT_OK(FillBatch((array->dictionary()->type()).get(), cbatch,
+                              constructedArrowOffset, orcOffset, 1,
+                              (array->dictionary()->Slice(index, 1)).get(), NULLPTR));
     }
   }
-  batch->numElements = orcOffset;
+  cbatch->numElements = orcOffset;
   return Status::OK();
 }
 
@@ -796,7 +798,7 @@ Status FillBatch(const DataType* type, liborc::ColumnVectorBatch* cbatch,
       return FillMapBatch(type, cbatch, arrowOffset, orcOffset, length, parray,
                           incomingMask);
     case Type::type::DICTIONARY: {
-      switch (parray->indices()->type()->id()) {
+      switch (static_cast<DictionaryArray*>(parray)->indices()->type()->id()) {
         case Type::type::INT8:
           return FillDictionaryBatch<NumericArray<arrow::Int8Type>>(
               type, cbatch, arrowOffset, orcOffset, length, parray, incomingMask);
@@ -824,7 +826,7 @@ Status FillBatch(const DataType* type, liborc::ColumnVectorBatch* cbatch,
         default: {
           return Status::Invalid(
               "Unknown or unsupported Arrow index type kind for dictionary arrays: ",
-              parray->indices()->type()->id());
+              static_cast<DictionaryArray*>(parray)->indices()->type()->id());
         }
       }
     }
@@ -1073,8 +1075,10 @@ Status GetORCType(const DataType* type, ORC_UNIQUE_PTR<liborc::Type>* out) {
     // actual value type.
     case Type::type::DICTIONARY: {
       DataType* arrowValueType =
-          checked_cast<const DictionaryType*>(type)->dictionary()->type().get();
-      RETURN_NOT_OK(GetORCType(arrowValueType, std::move(out)));
+          (checked_cast<const DictionaryType*>(type)->value_type()).get();
+      ORC_UNIQUE_PTR<liborc::Type> orcType;
+      RETURN_NOT_OK(GetORCType(arrowValueType, &orcType));
+      *out = std::move(orcType);
     }
     default: {
       return Status::Invalid("Unknown or unsupported Arrow type kind: ", kind);
