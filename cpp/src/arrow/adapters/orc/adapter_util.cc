@@ -1076,9 +1076,7 @@ Status GetORCType(const DataType* type, ORC_UNIQUE_PTR<liborc::Type>* out) {
     case Type::type::DICTIONARY: {
       DataType* arrowValueType =
           (checked_cast<const DictionaryType*>(type)->value_type()).get();
-      ORC_UNIQUE_PTR<liborc::Type> orcType;
-      RETURN_NOT_OK(GetORCType(arrowValueType, &orcType));
-      *out = std::move(orcType);
+      RETURN_NOT_OK(GetORCType(arrowValueType, out));
     }
     default: {
       return Status::Invalid("Unknown or unsupported Arrow type kind: ", kind);
