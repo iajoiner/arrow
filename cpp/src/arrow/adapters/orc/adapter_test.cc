@@ -266,6 +266,66 @@ std::unique_ptr<liborc::Writer> CreateWriter(uint64_t stripe_size,
   return liborc::createWriter(type, stream, options);
 }
 
+TEST(TestAdapterWriteConverter, typeDictTrivial4) {
+  auto type = dictionary(
+      uint8(),
+      dictionary(int16(),
+                 struct_({field("a", dictionary(uint32(), utf8())),
+                          field("b", dictionary(int64(),
+                                                dictionary(int64(), large_binary())))})));
+  std::unique_ptr<liborc::Type> out = adapters::orc::GetORCType(*type).ValueOrDie();
+  // RecordProperty("kind", out->getKind());
+  EXPECT_EQ(out->getSubtypeCount(), 2);
+  EXPECT_EQ(out->getKind(), liborc::TypeKind::STRUCT);
+  EXPECT_EQ(out->getSubtype(0)->getSubtypeCount(), 0);
+  EXPECT_EQ(out->getSubtype(0)->getKind(), liborc::TypeKind::STRING);
+  EXPECT_EQ(out->getSubtype(1)->getSubtypeCount(), 0);
+  EXPECT_EQ(out->getSubtype(1)->getKind(), liborc::TypeKind::BINARY);
+}
+
+TEST(TestAdapterWriteConverter, typeDictTrivial5) {
+  auto type = struct_({field("a", dictionary(uint32(), utf8()))});
+  std::unique_ptr<liborc::Type> out = adapters::orc::GetORCType(*type).ValueOrDie();
+  EXPECT_EQ(out->getSubtypeCount(), 1);
+  EXPECT_EQ(out->getKind(), liborc::TypeKind::STRUCT);
+  EXPECT_EQ(out->getSubtype(0)->getSubtypeCount(), 0);
+  EXPECT_EQ(out->getSubtype(0)->getKind(), liborc::TypeKind::STRING);
+}
+
+TEST(TestAdapterWriteConverter, typeDictTrivial6) {
+  auto type = list(dictionary(uint32(), utf8()));
+  std::unique_ptr<liborc::Type> out = adapters::orc::GetORCType(*type).ValueOrDie();
+  EXPECT_EQ(out->getSubtypeCount(), 1);
+  EXPECT_EQ(out->getKind(), liborc::TypeKind::LIST);
+  EXPECT_EQ(out->getSubtype(0)->getSubtypeCount(), 0);
+  EXPECT_EQ(out->getSubtype(0)->getKind(), liborc::TypeKind::STRING);
+}
+
+TEST(TestAdapterWriteConverter, typeDictTrivial) {
+  auto type = dictionary(int16(), utf8());
+  std::unique_ptr<liborc::Type> out = adapters::orc::GetORCType(*type).ValueOrDie();
+  EXPECT_EQ(out->getSubtypeCount(), 0);
+  EXPECT_EQ(out->getKind(), liborc::TypeKind::STRING);
+}
+
+TEST(TestAdapterWriteConverter, typeDictTrivial2) {
+  auto type = dictionary(uint8(), struct_({field("a", utf8())}));
+  std::unique_ptr<liborc::Type> out = adapters::orc::GetORCType(*type).ValueOrDie();
+  EXPECT_EQ(out->getSubtypeCount(), 1);
+  EXPECT_EQ(out->getKind(), liborc::TypeKind::STRUCT);
+  EXPECT_EQ(out->getSubtype(0)->getSubtypeCount(), 0);
+  EXPECT_EQ(out->getSubtype(0)->getKind(), liborc::TypeKind::STRING);
+}
+
+TEST(TestAdapterWriteConverter, typeDictTrivial3) {
+  auto type = dictionary(uint8(), dictionary(uint8(), struct_({field("a", utf8())})));
+  std::unique_ptr<liborc::Type> out = adapters::orc::GetORCType(*type).ValueOrDie();
+  EXPECT_EQ(out->getSubtypeCount(), 1);
+  EXPECT_EQ(out->getKind(), liborc::TypeKind::STRUCT);
+  EXPECT_EQ(out->getSubtype(0)->getSubtypeCount(), 0);
+  EXPECT_EQ(out->getSubtype(0)->getKind(), liborc::TypeKind::STRING);
+}
+
 TEST(TestAdapterRead, readIntAndStringFileMultipleStripes) {
   MemoryOutputStream mem_stream(kDefaultMemStreamSize);
   ORC_UNIQUE_PTR<liborc::Type> type(

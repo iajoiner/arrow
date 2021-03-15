@@ -53,7 +53,7 @@ arrow::Status AppendStructBatch(const liborc::Type* type,
   auto builder = checked_cast<arrow::StructBuilder*>(abuilder);
   auto batch = checked_cast<liborc::StructVectorBatch*>(column_vector_batch);
 
-  const uint8_t* valid_bytes = NULLPTR;
+  const uint8_t* valid_bytes = nullptr;
   if (batch->hasNulls) {
     valid_bytes = reinterpret_cast<const uint8_t*>(batch->notNull.data()) + offset;
   }
@@ -129,7 +129,7 @@ arrow::Status AppendNumericBatch(liborc::ColumnVectorBatch* column_vector_batch,
   if (length == 0) {
     return arrow::Status::OK();
   }
-  const uint8_t* valid_bytes = NULLPTR;
+  const uint8_t* valid_bytes = nullptr;
   if (batch->hasNulls) {
     valid_bytes = reinterpret_cast<const uint8_t*>(batch->notNull.data()) + offset;
   }
@@ -149,7 +149,7 @@ arrow::Status AppendNumericBatchCast(liborc::ColumnVectorBatch* column_vector_ba
     return arrow::Status::OK();
   }
 
-  const uint8_t* valid_bytes = NULLPTR;
+  const uint8_t* valid_bytes = nullptr;
   if (batch->hasNulls) {
     valid_bytes = reinterpret_cast<const uint8_t*>(batch->notNull.data()) + offset;
   }
@@ -173,7 +173,7 @@ arrow::Status AppendBoolBatch(liborc::ColumnVectorBatch* column_vector_batch,
     return arrow::Status::OK();
   }
 
-  const uint8_t* valid_bytes = NULLPTR;
+  const uint8_t* valid_bytes = nullptr;
   if (batch->hasNulls) {
     valid_bytes = reinterpret_cast<const uint8_t*>(batch->notNull.data()) + offset;
   }
@@ -197,7 +197,7 @@ arrow::Status AppendTimestampBatch(liborc::ColumnVectorBatch* column_vector_batc
     return arrow::Status::OK();
   }
 
-  const uint8_t* valid_bytes = NULLPTR;
+  const uint8_t* valid_bytes = nullptr;
   if (batch->hasNulls) {
     valid_bytes = reinterpret_cast<const uint8_t*>(batch->notNull.data()) + offset;
   }
@@ -281,7 +281,6 @@ arrow::Status AppendDecimalBatch(const liborc::Type* type,
   }
   return arrow::Status::OK();
 }
-
 }  // namespace
 
 namespace arrow {
@@ -292,7 +291,7 @@ namespace orc {
 
 Status AppendBatch(const liborc::Type* type, liborc::ColumnVectorBatch* batch,
                    int64_t offset, int64_t length, arrow::ArrayBuilder* builder) {
-  if (type == NULLPTR) {
+  if (type == nullptr) {
     return arrow::Status::OK();
   }
   liborc::TypeKind kind = type->getKind();
@@ -349,25 +348,10 @@ namespace {
 
 using arrow::internal::checked_cast;
 
-// template <class ValueType>
-// struct NumericAppender {
-//   void VisitNull() {
-//     batch->notNull[orc_offset] = false;
-//     orc_offset++;
-//   }
-//   void VisitValue(ValueType value) {
-//     batch->data[*orc_offset] = value;
-//     batch->notNull[*orc_offset] = true;
-//     orc_offset++;
-//   }
-//   liborc::ColumnVectorBatch* batch;
-//   int orc_offset;
-// };
-
 arrow::Status WriteBatch(liborc::ColumnVectorBatch* column_vector_batch,
                          int64_t* arrow_offset, int64_t* orc_offset,
                          const int64_t& length, const arrow::Array& parray,
-                         const std::vector<bool>* incoming_mask = NULLPTR);
+                         const std::vector<bool>* incoming_mask = nullptr);
 
 // incoming_mask is exclusively used by FillStructBatch. The cause is that ORC is much
 // stricter than Arrow in terms of consistency. In this case if a struct scalar is null
@@ -712,6 +696,63 @@ arrow::Status WriteMapBatch(liborc::ColumnVectorBatch* column_vector_batch,
   return arrow::Status::OK();
 }
 
+std::shared_ptr<arrow::DataType> DedictionizeType(
+    const std::shared_ptr<arrow::DataType>& type) {
+  arrow::Type::type kind = type->id();
+  switch (kind) {
+    case arrow::Type::type::DICTIONARY: {
+      return std::static_pointer_cast<arrow::DictionaryType>(type)->value_type();
+    }
+    case arrow::Type::type::STRUCT: {
+      std::vector<std::shared_ptr<arrow::Field>> fields = type->fields();
+      std::size_t size = fields.size();
+      std::vector<std::shared_ptr<arrow::Field>> new_fields(size, nullptr);
+      for (std::size_t i = 0; i < size; i++) {
+        std::shared_ptr<arrow::Field> field = fields[i];
+        new_fields[i] = field->WithType(DedictionizeType(field->type()));
+      }
+      return struct_(new_fields);
+    }
+    case arrow::Type::type::LIST: {
+      return list(DedictionizeType(
+          std::static_pointer_cast<arrow::ListType>(type)->value_type()));
+    }
+    case arrow::Type::type::LARGE_LIST: {
+      return large_list(DedictionizeType(
+          std::static_pointer_cast<arrow::LargeListType>(type)->value_type()));
+    }
+    case arrow::Type::type::FIXED_SIZE_LIST: {
+      auto fixed_size_list_type =
+          std::static_pointer_cast<arrow::FixedSizeListType>(type);
+      return fixed_size_list(DedictionizeType(fixed_size_list_type->value_type()),
+                             fixed_size_list_type->list_size());
+    }
+    case arrow::Type::type::MAP: {
+      auto map_type = std::static_pointer_cast<arrow::MapType>(type);
+      return map(DedictionizeType(map_type->key_type()),
+                 DedictionizeType(map_type->item_type()));
+    }
+    default: {  // No dict found!
+      return type;
+    }
+  }
+}
+
+// arrow::Array DedictionizeArray(arrow::Array array) {
+//   arrow::Type::type kind = array.type_id();
+//   switch (kind) {
+//     case arrow::Type::type::DICTIONARY:
+//     case arrow::Type::type::STRUCT:
+//     case arrow::Type::type::LIST:
+//     case arrow::Type::type::LARGE_LIST:
+//     case arrow::Type::type::FIXED_SIZE_LIST:
+//     case arrow::Type::type::MAP:
+//     default: {  // No dict found!
+//       return array;
+//     }
+//   }
+// }
+
 arrow::Status WriteBatch(liborc::ColumnVectorBatch* column_vector_batch,
                          int64_t* arrow_offset, int64_t* orc_offset,
                          const int64_t& length, const arrow::Array& array,
@@ -854,9 +895,9 @@ Status WriteBatch(liborc::ColumnVectorBatch* column_vector_batch,
 }
 
 Status GetArrowType(const liborc::Type* type, std::shared_ptr<DataType>* out) {
-  // When subselecting fields on read, liborc will set some nodes to NULLPTR,
-  // so we need to check for NULLPTR before progressing
-  if (type == NULLPTR) {
+  // When subselecting fields on read, liborc will set some nodes to nullptr,
+  // so we need to check for nullptr before progressing
+  if (type == nullptr) {
     *out = null();
     return arrow::Status::OK();
   }
@@ -1046,6 +1087,13 @@ Result<ORC_UNIQUE_PTR<liborc::Type>> GetORCType(const DataType& type) {
         out_type->addUnionChild(std::move(orc_subtype));
       }
       return out_type;
+    }
+    // Dictionary is an encoding method, not a TypeKind in ORC. Hence we need to get the
+    // actual value type.
+    case Type::type::DICTIONARY: {
+      std::shared_ptr<DataType> arrow_value_type =
+          checked_cast<const DictionaryType&>(type).value_type();
+      return GetORCType(*arrow_value_type).ValueOrDie();
     }
     default: {
       return Status::Invalid("Unknown or unsupported Arrow type: ", type.ToString());
