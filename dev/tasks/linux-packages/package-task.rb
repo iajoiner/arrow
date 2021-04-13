@@ -248,7 +248,9 @@ class PackageTask
     # because they require some setups on host.
     [
       "debian-buster",
-      # "debian-stretch-arm64",
+      # "debian-buster-arm64",
+      "debian-bullseye",
+      # "debian-bullseye-arm64",
       "ubuntu-bionic",
       # "ubuntu-bionic-arm64",
       "ubuntu-focal",
@@ -356,6 +358,7 @@ VERSION=#{@deb_upstream_version}
       end
 
       namespace :build do
+        desc "Open console"
         task :console => build_dependencies do
           apt_build(console: true) if enable_apt?
         end
@@ -489,6 +492,7 @@ RELEASE=#{@rpm_release}
       end
 
       namespace :build do
+        desc "Open console"
         task :console => build_dependencies do
           yum_build(console: true) if enable_yum?
         end

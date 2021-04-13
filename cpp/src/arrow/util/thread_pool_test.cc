@@ -123,6 +123,128 @@ class AddTester {
   std::vector<int> outs_;
 };
 
+class TestRunSynchronously : public testing::TestWithParam<bool> {
+ public:
+  bool UseThreads() { return GetParam(); }
+
+  template <typename T>
+  Result<T> Run(FnOnce<Future<T>(Executor*)> top_level_task) {
+    return RunSynchronously(std::move(top_level_task), UseThreads());
+  }
+
+  Status RunVoid(FnOnce<Future<>(Executor*)> top_level_task) {
+    return RunSynchronouslyVoid(std::move(top_level_task), UseThreads());
+  }
+};
+
+TEST_P(TestRunSynchronously, SimpleRun) {
+  bool task_ran = false;
+  auto task = [&](Executor* executor) {
+    EXPECT_NE(executor, nullptr);
+    task_ran = true;
+    return Future<>::MakeFinished(Status::OK());
+  };
+  ASSERT_OK(RunVoid(std::move(task)));
+  EXPECT_TRUE(task_ran);
+}
+
+TEST_P(TestRunSynchronously, SpawnNested) {
+  bool nested_ran = false;
+  auto top_level_task = [&](Executor* executor) {
+    return DeferNotOk(executor->Submit([&] {
+      nested_ran = true;
+      return Status::OK();
+    }));
+  };
+  ASSERT_OK(RunVoid(std::move(top_level_task)));
+  EXPECT_TRUE(nested_ran);
+}
+
+TEST_P(TestRunSynchronously, SpawnMoreNested) {
+  std::atomic<int> nested_ran{0};
+  auto top_level_task = [&](Executor* executor) -> Future<> {
+    auto fut_a = DeferNotOk(executor->Submit([&] { nested_ran++; }));
+    auto fut_b = DeferNotOk(executor->Submit([&] { nested_ran++; }));
+    return AllComplete({fut_a, fut_b})
+        .Then([&](const Result<arrow::detail::Empty>& result) {
+          nested_ran++;
+          return result;
+        });
+  };
+  ASSERT_OK(RunVoid(std::move(top_level_task)));
+  EXPECT_EQ(nested_ran, 3);
+}
+
+TEST_P(TestRunSynchronously, WithResult) {
+  auto top_level_task = [&](Executor* executor) {
+    return DeferNotOk(executor->Submit([] { return 42; }));
+  };
+  ASSERT_OK_AND_EQ(42, Run<int>(std::move(top_level_task)));
+}
+
+TEST_P(TestRunSynchronously, StopTokenSpawn) {
+  bool nested_ran = false;
+  StopSource stop_source;
+  auto top_level_task = [&](Executor* executor) -> Future<> {
+    stop_source.RequestStop(Status::Invalid("XYZ"));
+    RETURN_NOT_OK(executor->Spawn([&] { nested_ran = true; }, stop_source.token()));
+    return Future<>::MakeFinished();
+  };
+  ASSERT_OK(RunVoid(std::move(top_level_task)));
+  EXPECT_FALSE(nested_ran);
+}
+
+TEST_P(TestRunSynchronously, StopTokenSubmit) {
+  bool nested_ran = false;
+  StopSource stop_source;
+  auto top_level_task = [&](Executor* executor) -> Future<> {
+    stop_source.RequestStop();
+    return DeferNotOk(executor->Submit(stop_source.token(), [&] {
+      nested_ran = true;
+      return Status::OK();
+    }));
+  };
+  ASSERT_RAISES(Cancelled, RunVoid(std::move(top_level_task)));
+  EXPECT_FALSE(nested_ran);
+}
+
+TEST_P(TestRunSynchronously, ContinueAfterExternal) {
+  bool continuation_ran = false;
+  EXPECT_OK_AND_ASSIGN(auto mock_io_pool, ThreadPool::Make(1));
+  auto top_level_task = [&](Executor* executor) {
+    struct Callback {
+      Status operator()(...) {
+        continuation_ran = true;
+        return Status::OK();
+      }
+      bool& continuation_ran;
+    };
+    return executor
+        ->Transfer(DeferNotOk(mock_io_pool->Submit([&] {
+          SleepABit();
+          return Status::OK();
+        })))
+        .Then(Callback{continuation_ran});
+  };
+  ASSERT_OK(RunVoid(std::move(top_level_task)));
+  EXPECT_TRUE(continuation_ran);
+}
+
+TEST_P(TestRunSynchronously, SchedulerAbort) {
+  auto top_level_task = [&](Executor* executor) { return Status::Invalid("XYZ"); };
+  ASSERT_RAISES(Invalid, RunVoid(std::move(top_level_task)));
+}
+
+TEST_P(TestRunSynchronously, PropagatedError) {
+  auto top_level_task = [&](Executor* executor) {
+    return DeferNotOk(executor->Submit([] { return Status::Invalid("XYZ"); }));
+  };
+  ASSERT_RAISES(Invalid, RunVoid(std::move(top_level_task)));
+}
+
+INSTANTIATE_TEST_SUITE_P(TestRunSynchronously, TestRunSynchronously,
+                         ::testing::Values(false, true));
+
 class TestThreadPool : public ::testing::Test {
  public:
   void TearDown() override {
@@ -291,13 +413,20 @@ TEST_F(TestThreadPool, SetCapacity) {
   ASSERT_EQ(pool->GetCapacity(), 3);
   ASSERT_EQ(pool->GetActualCapacity(), 0);
 
-  ASSERT_OK(pool->Spawn(std::bind(SleepFor, /*seconds=*/0.1)));
-  ASSERT_EQ(pool->GetActualCapacity(), 1);
+  auto gating_task = GatingTask::Make();
 
+  ASSERT_OK(pool->Spawn(gating_task->Task()));
+  ASSERT_OK(gating_task->WaitForRunning(1));
+  ASSERT_EQ(pool->GetActualCapacity(), 1);
+  ASSERT_OK(gating_task->Unlock());
+
+  gating_task = GatingTask::Make();
   // Spawn more tasks than the pool capacity
   for (int i = 0; i < 6; ++i) {
-    ASSERT_OK(pool->Spawn(std::bind(SleepFor, /*seconds=*/0.1)));
+    ASSERT_OK(pool->Spawn(gating_task->Task()));
   }
+  ASSERT_OK(gating_task->WaitForRunning(3));
+  SleepFor(0.001);  // Sleep a bit just to make sure it isn't making any threads
   ASSERT_EQ(pool->GetActualCapacity(), 3);  // maxxed out
 
   // The tasks have not finished yet, increasing the desired capacity
@@ -309,20 +438,25 @@ TEST_F(TestThreadPool, SetCapacity) {
   // Thread reaping is eager (but asynchronous)
   ASSERT_OK(pool->SetCapacity(2));
   ASSERT_EQ(pool->GetCapacity(), 2);
+
   // Wait for workers to wake up and secede
+  ASSERT_OK(gating_task->Unlock());
   BusyWait(0.5, [&] { return pool->GetActualCapacity() == 2; });
   ASSERT_EQ(pool->GetActualCapacity(), 2);
 
   // Downsize while tasks are pending
   ASSERT_OK(pool->SetCapacity(5));
   ASSERT_EQ(pool->GetCapacity(), 5);
+  gating_task = GatingTask::Make();
   for (int i = 0; i < 10; ++i) {
-    ASSERT_OK(pool->Spawn(std::bind(SleepFor, /*seconds=*/0.1)));
+    ASSERT_OK(pool->Spawn(gating_task->Task()));
   }
+  ASSERT_OK(gating_task->WaitForRunning(5));
   ASSERT_EQ(pool->GetActualCapacity(), 5);
 
   ASSERT_OK(pool->SetCapacity(2));
   ASSERT_EQ(pool->GetCapacity(), 2);
+  ASSERT_OK(gating_task->Unlock());
   BusyWait(0.5, [&] { return pool->GetActualCapacity() == 2; });
   ASSERT_EQ(pool->GetActualCapacity(), 2);
 

@@ -45,7 +45,7 @@ struct ArithmeticOptions : public FunctionOptions {
 struct ARROW_EXPORT MatchSubstringOptions : public FunctionOptions {
   explicit MatchSubstringOptions(std::string pattern) : pattern(std::move(pattern)) {}
 
-  /// The exact substring to look for inside input values.
+  /// The exact substring (or regex, depending on kernel) to look for inside input values.
   std::string pattern;
 };
 
@@ -66,6 +66,19 @@ struct ARROW_EXPORT SplitPatternOptions : public SplitOptions {
 
   /// The exact substring to look for inside input values.
   std::string pattern;
+};
+
+struct ARROW_EXPORT ReplaceSubstringOptions : public FunctionOptions {
+  explicit ReplaceSubstringOptions(std::string pattern, std::string replacement,
+                                   int64_t max_replacements = -1)
+      : pattern(pattern), replacement(replacement), max_replacements(max_replacements) {}
+
+  /// Pattern to match, literal, or regular expression depending on which kernel is used
+  std::string pattern;
+  /// String to replace the pattern with
+  std::string replacement;
+  /// Max number of substrings to replace (-1 means unbounded)
+  int64_t max_replacements;
 };
 
 /// Options for IsIn and IndexIn functions

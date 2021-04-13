@@ -90,6 +90,13 @@ test_that("Setup (putting data in the dir)", {
   expect_length(dir(tsv_dir, recursive = TRUE), 2)
 })
 
+if(arrow_with_parquet()) {
+  files <- c(
+    file.path(dataset_dir, 1, "file1.parquet", fsep = "/"),
+    file.path(dataset_dir, 2, "file2.parquet", fsep = "/")
+  )
+}
+
 test_that("Simple interface for datasets", {
   skip_if_not_available("parquet")
   ds <- open_dataset(dataset_dir, partitioning = schema(part = uint8()))
@@ -163,7 +170,40 @@ test_that("dim() correctly determine numbers of rows and columns on arrow_dplyr_
   )
 })
 
-test_that("dataset from URI", {
+test_that("dataset from single local file path", {
+  skip_on_os("windows")
+  skip_if_not_available("parquet")
+  ds <- open_dataset(files[1])
+  expect_is(ds, "Dataset")
+  expect_equivalent(
+    ds %>%
+      select(chr, dbl) %>%
+      filter(dbl > 7) %>%
+      collect() %>%
+      arrange(dbl),
+    df1[8:10, c("chr", "dbl")]
+  )
+})
+
+test_that("dataset from vector of file paths", {
+  skip_on_os("windows")
+  skip_if_not_available("parquet")
+  ds <- open_dataset(files)
+  expect_is(ds, "Dataset")
+  expect_equivalent(
+    ds %>%
+      select(chr, dbl) %>%
+      filter(dbl > 7 & dbl < 53L) %>%
+      collect() %>%
+      arrange(dbl),
+    rbind(
+      df1[8:10, c("chr", "dbl")],
+      df2[1:2, c("chr", "dbl")]
+    )
+  )
+})
+
+test_that("dataset from directory URI", {
   skip_on_os("windows")
   skip_if_not_available("parquet")
   uri <- paste0("file://", dataset_dir)
@@ -179,6 +219,50 @@ test_that("dataset from URI", {
       df1[8:10, c("chr", "dbl")],
       df2[1:2, c("chr", "dbl")]
     )
+  )
+})
+
+test_that("dataset from single file URI", {
+  skip_on_os("windows")
+  skip_if_not_available("parquet")
+  uri <- paste0("file://", files[1])
+  ds <- open_dataset(uri)
+  expect_is(ds, "Dataset")
+  expect_equivalent(
+    ds %>%
+      select(chr, dbl) %>%
+      filter(dbl > 7) %>%
+      collect() %>%
+      arrange(dbl),
+    df1[8:10, c("chr", "dbl")]
+  )
+})
+
+test_that("dataset from vector of file URIs", {
+  skip_on_os("windows")
+  skip_if_not_available("parquet")
+  uris <- paste0("file://", files)
+  ds <- open_dataset(uris)
+  expect_is(ds, "Dataset")
+  expect_equivalent(
+    ds %>%
+      select(chr, dbl) %>%
+      filter(dbl > 7 & dbl < 53L) %>%
+      collect() %>%
+      arrange(dbl),
+    rbind(
+      df1[8:10, c("chr", "dbl")],
+      df2[1:2, c("chr", "dbl")]
+    )
+  )
+})
+
+test_that("open_dataset errors on mixed paths and URIs", {
+  skip_on_os("windows")
+  skip_if_not_available("parquet")
+  expect_error(
+    open_dataset(c(files[1], paste0("file://", files[2]))),
+    "Vectors of mixed paths and URIs are not supported"
   )
 })
 
@@ -270,6 +354,7 @@ test_that("IPC/Feather format data", {
 })
 
 test_that("CSV dataset", {
+  skip_on_os("windows") # https://issues.apache.org/jira/browse/ARROW-12181
   ds <- open_dataset(csv_dir, partitioning = "part", format = "csv")
   expect_is(ds$format, "CsvFileFormat")
   expect_is(ds$filesystem, "LocalFileSystem")
@@ -292,6 +377,95 @@ test_that("CSV dataset", {
   expect_equal(
     collect(ds) %>% pull(part),
     c(rep(5, 10), rep(6, 10))
+  )
+})
+
+test_that("CSV scan options", {
+  options <- FragmentScanOptions$create("text")
+  expect_equal(options$type, "csv")
+  options <- FragmentScanOptions$create("csv",
+                                        null_values = c("mynull"),
+                                        strings_can_be_null = TRUE)
+  expect_equal(options$type, "csv")
+
+  dst_dir <- make_temp_dir()
+  dst_file <- file.path(dst_dir, "data.csv")
+  df <- tibble(chr = c("foo", "mynull"))
+  write.csv(df, dst_file, row.names = FALSE, quote = FALSE)
+
+  ds <- open_dataset(dst_dir, format = "csv")
+  expect_equivalent(ds %>% collect(), df)
+
+  sb <- ds$NewScan()
+  sb$FragmentScanOptions(options)
+
+  tab <- sb$Finish()$ToTable()
+  expect_equivalent(as.data.frame(tab), tibble(chr = c("foo", NA)))
+
+  # Set default convert options in CsvFileFormat
+  csv_format <- CsvFileFormat$create(null_values = c("mynull"),
+                                     strings_can_be_null = TRUE)
+  ds <- open_dataset(dst_dir, format = csv_format)
+  expect_equivalent(ds %>% collect(), tibble(chr = c("foo", NA)))
+
+  # Set both parse and convert options
+  df <- tibble(chr = c("foo", "mynull"), chr2 = c("bar", "baz"))
+  write.table(df, dst_file, row.names = FALSE, quote = FALSE, sep = "\t")
+  ds <- open_dataset(dst_dir, format = "csv",
+                     delimiter="\t",
+                     null_values = c("mynull"),
+                     strings_can_be_null = TRUE)
+  expect_equivalent(ds %>% collect(), tibble(chr = c("foo", NA),
+                                             chr2 = c("bar", "baz")))
+})
+
+test_that("compressed CSV dataset", {
+  skip_if_not_available("gzip")
+  dst_dir <- make_temp_dir()
+  dst_file <- file.path(dst_dir, "data.csv.gz")
+  write.csv(df1, gzfile(dst_file), row.names = FALSE, quote = FALSE)
+  format <- FileFormat$create("csv")
+  ds <- open_dataset(dst_dir, format = format)
+  expect_is(ds$format, "CsvFileFormat")
+  expect_is(ds$filesystem, "LocalFileSystem")
+
+  expect_equivalent(
+    ds %>%
+      select(string = chr, integer = int) %>%
+      filter(integer > 6 & integer < 11) %>%
+      collect() %>%
+      summarize(mean = mean(integer)),
+    df1 %>%
+      select(string = chr, integer = int) %>%
+      filter(integer > 6) %>%
+      summarize(mean = mean(integer))
+  )
+})
+
+test_that("CSV dataset options", {
+  dst_dir <- make_temp_dir()
+  dst_file <- file.path(dst_dir, "data.csv")
+  df <- tibble(chr = letters[1:10])
+  write.csv(df, dst_file, row.names = FALSE, quote = FALSE)
+
+  format <- FileFormat$create("csv", skip_rows = 1)
+  ds <- open_dataset(dst_dir, format = format)
+
+  expect_equivalent(
+    ds %>%
+      select(string = a) %>%
+      collect(),
+    df1[-1,] %>%
+      select(string = chr)
+  )
+
+  ds <- open_dataset(dst_dir, format = "csv", column_names = c("foo"))
+
+  expect_equivalent(
+    ds %>%
+      select(string = foo) %>%
+      collect(),
+    tibble(foo = c(c('chr'), letters[1:10]))
   )
 })
 
@@ -445,7 +619,7 @@ test_that("Creating UnionDataset", {
   )
 
   # Confirm c() method error handling
-  expect_error(c(ds1, 42), "string")
+  expect_error(c(ds1, 42), "character")
 })
 
 test_that("InMemoryDataset", {
@@ -528,6 +702,37 @@ test_that("filter() with %in%", {
   )
 })
 
+test_that("filter() with negative scalar", {
+  skip_if_not_available("parquet")
+  ds <- open_dataset(dataset_dir, partitioning = schema(part = uint8()))
+  expect_equivalent(
+    ds %>%
+      filter(part == 1) %>%
+      select(chr, int) %>%
+      filter(int > -2) %>%
+      collect(),
+    df1[, c("chr", "int")]
+  )
+
+  expect_equivalent(
+    ds %>%
+      filter(part == 1) %>%
+      select(chr, int) %>%
+      filter(int %in% -2) %>%
+      collect(),
+    df1[FALSE, c("chr", "int")]
+  )
+
+  expect_equivalent(
+    ds %>%
+      filter(part == 1) %>%
+      select(chr, int) %>%
+      filter(-int < -2) %>%
+      collect(),
+    df1[df1$int > 2, c("chr", "int")]
+  )
+})
+
 test_that("filter() with strings", {
   skip_if_not_available("parquet")
   ds <- open_dataset(dataset_dir, partitioning = schema(part = uint8()))
@@ -539,6 +744,7 @@ test_that("filter() with strings", {
     tibble(chr = "b", part = 1)
   )
 
+  skip_if_not_available("utf8proc")
   expect_equivalent(
     ds %>%
       select(chr, part) %>%
@@ -910,6 +1116,95 @@ test_that("count()", {
   )
 })
 
+test_that("arrange()", {
+  ds <- open_dataset(dataset_dir, partitioning = schema(part = uint8()))
+  arranged <- ds %>%
+    select(chr, dbl, int) %>%
+    filter(dbl * 2 > 14 & dbl - 50 < 3L) %>%
+    mutate(twice = int * 2) %>%
+    arrange(chr, desc(twice), dbl + int)
+  expect_output(
+    print(arranged),
+    "FileSystemDataset (query)
+chr: string
+dbl: double
+int: int32
+twice: expr
+
+* Filter: ((multiply_checked(dbl, 2) > 14) and (subtract_checked(dbl, 50) < 3))
+* Sorted by chr [asc], multiply_checked(int, 2) [desc], add_checked(dbl, int) [asc]
+See $.data for the source Arrow object",
+    fixed = TRUE
+  )
+  expect_equivalent(
+    arranged %>%
+      collect(),
+    rbind(
+      df1[8, c("chr", "dbl", "int")],
+      df2[2, c("chr", "dbl", "int")],
+      df1[9, c("chr", "dbl", "int")],
+      df2[1, c("chr", "dbl", "int")],
+      df1[10, c("chr", "dbl", "int")]
+    ) %>%
+      mutate(
+        twice = int * 2
+      )
+  )
+})
+
+test_that("compute()/collect(as_data_frame=FALSE)", {
+  skip_if_not_available("parquet")
+  ds <- open_dataset(dataset_dir)
+
+  tab1 <- ds %>% compute()
+  expect_is(tab1, "Table")
+
+  tab2 <- ds %>% collect(as_data_frame = FALSE)
+  expect_is(tab2, "Table")
+
+  tab3 <-  ds %>%
+    mutate(negint = -int) %>%
+    filter(negint > - 100) %>%
+    arrange(chr) %>%
+    select(negint) %>%
+    compute()
+
+  expect_is(tab3, "Table")
+
+  expect_equal(
+    tab3 %>% collect(),
+    tibble(negint = -1:-10)
+  )
+
+  tab4 <-  ds %>%
+    mutate(negint = -int) %>%
+    filter(negint > - 100) %>%
+    arrange(chr) %>%
+    select(negint) %>%
+    collect(as_data_frame = FALSE)
+
+  expect_is(tab3, "Table")
+
+  expect_equal(
+    tab4 %>% collect(),
+    tibble(negint = -1:-10)
+  )
+
+  tab5 <- ds %>%
+    mutate(negint = -int) %>%
+    group_by(fct) %>%
+    compute()
+
+  # the group_by() prevents compute() from returning a Table...
+  expect_is(tab5, "arrow_dplyr_query")
+
+  # ... but $.data is a Table...
+  expect_is(tab5$.data, "Table")
+  # ... and the mutate() was evaluated
+  expect_true("negint" %in% names(tab5$.data))
+
+})
+
 test_that("head/tail", {
   skip_if_not_available("parquet")
   ds <- open_dataset(dataset_dir)
@@ -997,7 +1292,6 @@ test_that("dplyr method not implemented messages", {
   expect_not_implemented <- function(x) {
     expect_error(x, "is not currently implemented for Arrow Datasets")
   }
-  expect_not_implemented(ds %>% arrange(int))
   expect_not_implemented(ds %>% filter(int == 1) %>% summarize(n()))
 })
 
@@ -1071,13 +1365,6 @@ expect_scan_result <- function(ds, schm) {
   )
 }
 
-if(arrow_with_parquet()) {
-  files <- c(
-    file.path(dataset_dir, 1, "file1.parquet", fsep = "/"),
-    file.path(dataset_dir, 2, "file2.parquet", fsep = "/")
-  )
-}
-
 test_that("Assembling a Dataset manually and getting a Table", {
   skip_if_not_available("parquet")
   fs <- LocalFileSystem$create()
@@ -1085,7 +1372,7 @@ test_that("Assembling a Dataset manually and getting a Table", {
   partitioning <- DirectoryPartitioning$create(schema(part = double()))
 
   fmt <- FileFormat$create("parquet")
-  factory <- FileSystemDatasetFactory$create(fs, selector, fmt, partitioning = partitioning)
+  factory <- FileSystemDatasetFactory$create(fs, selector, NULL, fmt, partitioning = partitioning)
   expect_is(factory, "FileSystemDatasetFactory")
 
   schm <- factory$Inspect()
@@ -1478,5 +1765,16 @@ test_that("Dataset writing: unsupported features/input validation", {
   )
   expect_error(
     write_dataset(ds, tempfile(), basename_template = NULL)
+  )
+})
+
+# see https://issues.apache.org/jira/browse/ARROW-11328
+test_that("Collecting zero columns from a dataset doesn't return entire dataset", {
+  skip_if_not_available("parquet")
+  tmp <- tempfile()
+  write_dataset(mtcars, tmp, format = "parquet")
+  expect_equal(
+    open_dataset(tmp) %>% select() %>% collect() %>% dim(),
+    c(32, 0)
   )
 })

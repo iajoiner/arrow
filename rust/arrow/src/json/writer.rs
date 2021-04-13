@@ -219,6 +219,24 @@ macro_rules! set_column_by_array_type {
     };
 }
 
+macro_rules! set_timestamp_column_by_array_type {
+    ($array_type:ident, $col_name:ident, $rows:ident, $array:ident, $row_count:ident) => {
+        let arr = $array.as_any().downcast_ref::<$array_type>().unwrap();
+
+        $rows
+            .iter_mut()
+            .enumerate()
+            .take($row_count)
+            .for_each(|(i, row)| {
+                if !arr.is_null(i) {
+                    if let Some(v) = arr.value_as_datetime(i) {
+                        row.insert($col_name.to_string(), v.to_string().into());
+                    }
+                }
+            });
+    };
+}
+
 fn set_column_by_primitive_type<T: ArrowPrimitiveType>(
     rows: &mut [JsonMap<String, Value>],
     row_count: usize,
@@ -284,6 +302,42 @@ fn set_column_for_json_rows(
         DataType::Utf8 => {
             set_column_by_array_type!(as_string_array, col_name, rows, array, row_count);
         }
+        DataType::Timestamp(TimeUnit::Second, _) => {
+            set_timestamp_column_by_array_type!(
+                TimestampSecondArray,
+                col_name,
+                rows,
+                array,
+                row_count
+            );
+        }
+        DataType::Timestamp(TimeUnit::Millisecond, _) => {
+            set_timestamp_column_by_array_type!(
+                TimestampMillisecondArray,
+                col_name,
+                rows,
+                array,
+                row_count
+            );
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            set_timestamp_column_by_array_type!(
+                TimestampMicrosecondArray,
+                col_name,
+                rows,
+                array,
+                row_count
+            );
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+            set_timestamp_column_by_array_type!(
+                TimestampNanosecondArray,
+                col_name,
+                rows,
+                array,
+                row_count
+            );
+        }
         DataType::Struct(_) => {
             let inner_objs =
                 struct_array_to_jsonmap_array(as_struct_array(array), row_count);
@@ -329,7 +383,7 @@ fn set_column_for_json_rows(
 }
 
 /// Converts an arrow [`RecordBatch`] into a `Vec` of Serde JSON
-/// [`serde_json::map::JsonMap`]s (objects)
+/// [`JsonMap`]s (objects)
 pub fn record_batches_to_json_rows(
     batches: &[RecordBatch],
 ) -> Vec<JsonMap<String, Value>> {
@@ -551,6 +605,62 @@ mod tests {
     }
 
     #[test]
+    fn write_timestamps() {
+        let ts_string = "2018-11-13T17:11:10.011375885995";
+        let ts_nanos = ts_string
+            .parse::<chrono::NaiveDateTime>()
+            .unwrap()
+            .timestamp_nanos();
+        let ts_micros = ts_nanos / 1000;
+        let ts_millis = ts_micros / 1000;
+        let ts_secs = ts_millis / 1000;
+
+        let arr_nanos =
+            TimestampNanosecondArray::from_opt_vec(vec![Some(ts_nanos), None], None);
+        let arr_micros =
+            TimestampMicrosecondArray::from_opt_vec(vec![Some(ts_micros), None], None);
+        let arr_millis =
+            TimestampMillisecondArray::from_opt_vec(vec![Some(ts_millis), None], None);
+        let arr_secs =
+            TimestampSecondArray::from_opt_vec(vec![Some(ts_secs), None], None);
+        let arr_names = StringArray::from(vec![Some("a"), Some("b")]);
+
+        let schema = Schema::new(vec![
+            Field::new("nanos", arr_nanos.data_type().clone(), false),
+            Field::new("micros", arr_micros.data_type().clone(), false),
+            Field::new("millis", arr_millis.data_type().clone(), false),
+            Field::new("secs", arr_secs.data_type().clone(), false),
+            Field::new("name", arr_names.data_type().clone(), false),
+        ]);
+        let schema = Arc::new(schema);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arr_nanos),
+                Arc::new(arr_micros),
+                Arc::new(arr_millis),
+                Arc::new(arr_secs),
+                Arc::new(arr_names),
+            ],
+        )
+        .unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = LineDelimitedWriter::new(&mut buf);
+            writer.write_batches(&[batch]).unwrap();
+        }
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            r#"{"nanos":"2018-11-13 17:11:10.011375885","micros":"2018-11-13 17:11:10.011375","millis":"2018-11-13 17:11:10.011","secs":"2018-11-13 17:11:10","name":"a"}
+{"name":"b"}
+"#
+        );
+    }
+
+    #[test]
     fn write_nested_structs() {
         let schema = Schema::new(vec![
             Field::new(
@@ -623,7 +733,7 @@ mod tests {
         let a_list_data = ArrayData::builder(field_c1.data_type().clone())
             .len(5)
             .add_buffer(a_value_offsets)
-            .add_child_data(a_values.data())
+            .add_child_data(a_values.data().clone())
             .null_bit_buffer(Buffer::from(vec![0b00011111]))
             .build();
         let a = ListArray::from(a_list_data);
@@ -675,7 +785,7 @@ mod tests {
             .len(3)
             .add_buffer(a_value_offsets)
             .null_bit_buffer(Buffer::from(vec![0b00000111]))
-            .add_child_data(a_values.data())
+            .add_child_data(a_values.data().clone())
             .build();
 
         let c1_value_offsets = Buffer::from(&[0, 2, 2, 3].to_byte_slice());
@@ -755,7 +865,7 @@ mod tests {
         let c1_list_data = ArrayData::builder(field_c1.data_type().clone())
             .len(3)
             .add_buffer(c1_value_offsets)
-            .add_child_data(struct_values.data())
+            .add_child_data(struct_values.data().clone())
             .null_bit_buffer(Buffer::from(vec![0b00000101]))
             .build();
         let c1 = ListArray::from(c1_list_data);
@@ -831,7 +941,6 @@ mod tests {
         writer.finish().unwrap();
         assert_eq!(String::from_utf8(writer.into_inner()).unwrap(), "");
     }
-
     #[test]
     fn json_writer_one_row() {
         let mut writer = ArrayWriter::new(vec![] as Vec<u8>);

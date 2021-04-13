@@ -150,7 +150,7 @@ impl Partitioning {
 }
 
 /// Distribution schemes
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Distribution {
     /// Unspecified distribution
     UnspecifiedDistribution,
@@ -308,3 +308,4 @@ pub mod udaf;
 pub mod udf;
 #[cfg(feature = "unicode_expressions")]
 pub mod unicode_expressions;
+pub mod union;

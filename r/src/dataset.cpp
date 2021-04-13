@@ -66,9 +66,9 @@ const char* r6_class_name<ds::FileFormat>::get(
 // [[dataset::export]]
 std::shared_ptr<ds::ScannerBuilder> dataset___Dataset__NewScan(
     const std::shared_ptr<ds::Dataset>& ds) {
-  auto context = std::make_shared<ds::ScanContext>();
-  context->pool = gc_memory_pool();
-  return ValueOrStop(ds->NewScan(std::move(context)));
+  auto options = std::make_shared<ds::ScanOptions>();
+  options->pool = gc_memory_pool();
+  return ValueOrStop(ds->NewScan(std::move(options)));
 }
 
 // [[dataset::export]]
@@ -158,6 +158,17 @@ std::shared_ptr<arrow::Schema> dataset___DatasetFactory__Inspect(
 std::shared_ptr<ds::DatasetFactory> dataset___UnionDatasetFactory__Make(
     const std::vector<std::shared_ptr<ds::DatasetFactory>>& children) {
   return ValueOrStop(ds::UnionDatasetFactory::Make(children));
+}
+
+// [[dataset::export]]
+std::shared_ptr<ds::FileSystemDatasetFactory> dataset___FileSystemDatasetFactory__Make0(
+    const std::shared_ptr<fs::FileSystem>& fs, const std::vector<std::string>& paths,
+    const std::shared_ptr<ds::FileFormat>& format) {
+  // TODO(fsaintjacques): Make options configurable
+  auto options = ds::FileSystemFactoryOptions{};
+
+  return arrow::internal::checked_pointer_cast<ds::FileSystemDatasetFactory>(
+      ValueOrStop(ds::FileSystemDatasetFactory::Make(fs, paths, format, options)));
 }
 
 // [[dataset::export]]
@@ -272,10 +283,34 @@ std::shared_ptr<ds::IpcFileFormat> dataset___IpcFileFormat__Make() {
 
 // [[dataset::export]]
 std::shared_ptr<ds::CsvFileFormat> dataset___CsvFileFormat__Make(
-    const std::shared_ptr<arrow::csv::ParseOptions>& parse_options) {
+    const std::shared_ptr<arrow::csv::ParseOptions>& parse_options,
+    const std::shared_ptr<arrow::csv::ConvertOptions>& convert_options,
+    const std::shared_ptr<arrow::csv::ReadOptions>& read_options) {
   auto format = std::make_shared<ds::CsvFileFormat>();
   format->parse_options = *parse_options;
+  auto scan_options = std::make_shared<ds::CsvFragmentScanOptions>();
+  if (convert_options) scan_options->convert_options = *convert_options;
+  if (read_options) scan_options->read_options = *read_options;
+  format->default_fragment_scan_options = std::move(scan_options);
   return format;
+}
+
+// FragmentScanOptions, CsvFragmentScanOptions
+
+// [[dataset::export]]
+std::string dataset___FragmentScanOptions__type_name(
+    const std::shared_ptr<ds::FragmentScanOptions>& fragment_scan_options) {
+  return fragment_scan_options->type_name();
+}
+
+// [[dataset::export]]
+std::shared_ptr<ds::CsvFragmentScanOptions> dataset___CsvFragmentScanOptions__Make(
+    const std::shared_ptr<arrow::csv::ConvertOptions>& convert_options,
+    const std::shared_ptr<arrow::csv::ReadOptions>& read_options) {
+  auto options = std::make_shared<ds::CsvFragmentScanOptions>();
+  options->convert_options = *convert_options;
+  options->read_options = *read_options;
+  return options;
 }
 
 // DirectoryPartitioning, HivePartitioning
@@ -344,6 +379,13 @@ void dataset___ScannerBuilder__UseThreads(const std::shared_ptr<ds::ScannerBuild
 void dataset___ScannerBuilder__BatchSize(const std::shared_ptr<ds::ScannerBuilder>& sb,
                                          int64_t batch_size) {
   StopIfNotOk(sb->BatchSize(batch_size));
+}
+
+// [[dataset::export]]
+void dataset___ScannerBuilder__FragmentScanOptions(
+    const std::shared_ptr<ds::ScannerBuilder>& sb,
+    const std::shared_ptr<ds::FragmentScanOptions>& options) {
+  StopIfNotOk(sb->FragmentScanOptions(options));
 }
 
 // [[dataset::export]]
