@@ -278,6 +278,24 @@ std::unique_ptr<liborc::Writer> CreateWriter(uint64_t stripe_size,
   return liborc::createWriter(type, stream, options);
 }
 
+TEST(TestUnion, test) {
+  MemoryOutputStream mem_stream(DEFAULT_SMALL_MEM_STREAM_SIZE);
+  ORC_UNIQUE_PTR<liborc::Type> schema(
+      liborc::Type::buildTypeFromString("struct<x:uniontype<a:string,b:int>>"));
+  liborc::WriterOptions options;
+  ORC_UNIQUE_PTR<liborc::Writer> writer = createWriter(*schema, &mem_stream, options);
+  int64_t batchSize = 4;
+  ORC_UNIQUE_PTR<liborc::ColumnVectorBatch> batch = writer->createRowBatch(batchSize);
+  liborc::StructVectorBatch* root =
+      internal::checked_cast<liborc::StructVectorBatch*>(batch.get());
+  liborc::UnionVectorBatch* x =
+      internal::checked_cast<liborc::UnionVectorBatch*>(root->fields[0]);
+  liborc::StringVectorBatch* a =
+      internal::checked_cast<liborc::StringVectorBatch*>(x->children[0]);
+  liborc::LongVectorBatch* b =
+      internal::checked_cast<liborc::LongVectorBatch*>(x->children[1]);
+}
+
 TEST(TestAdapterRead, ReadIntAndStringFileMultipleStripes) {
   MemoryOutputStream mem_stream(kDefaultMemStreamSize);
   ORC_UNIQUE_PTR<liborc::Type> type(
