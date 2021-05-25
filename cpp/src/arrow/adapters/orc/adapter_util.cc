@@ -735,6 +735,69 @@ Status WriteMapBatch(const Array& array, int64_t orc_offset,
   return Status::OK();
 }
 
+Status WriteDenseUnionBatch(const Array& array, int64_t orc_offset,
+                            liborc::ColumnVectorBatch* column_vector_batch) {
+  const DenseUnionArray& dense_union_array(checked_cast<const DenseUnionArray&>(array));
+  auto batch = checked_cast<liborc::UnionVectorBatch*>(column_vector_batch);
+  std::size_t size = type->fields().size();
+  int64_t arrow_length = array.length();
+  int64_t running_arrow_offset = 0, running_orc_offset = orc_offset;
+  std::vector<int64_t> subarray_orc_offset(size, 0), subarray_arrow_offset(size, -1),
+      subarray_element_count(size, 0);
+  for (int64_t i = 0; i < orc_offset; i++) {
+    subarray_orc_offset[batch->tags[i]]++;
+  }
+  // First fill fields of ColumnVectorBatch
+  // For the parent type no nulls exist
+  for (; running_arrow_offset < arrow_length;
+       running_orc_offset++, running_arrow_offset++) {
+    int tag = array.child_id(running_arrow_offset);
+    batch->tags[running_orc_offset] = tag;
+    batch->offsets[running_orc_offset] = running_orc_offset;
+    subarray_element_count[tag]++;
+    if (subarray_arrow_offset[tag] == -1) {
+      subarray_arrow_offset[tag] = array.value_offset(running_arrow_offset);
+    }
+  }
+  // Fill the fields
+  for (std::size_t i = 0; i < size; i++) {
+    batch->fields[i]->resize(orc_offset + arrow_length);
+    if (subarray_arrow_offset[i] >= 0) {
+      RETURN_NOT_OK(
+          WriteBatch(*(dense_union_array->field(i)), orc_offset, batch->fields[i]));
+    }
+  }
+  return Status::OK();
+}
+
+Status WriteSparseUnionBatch(const Array& array, int64_t orc_offset,
+                             liborc::ColumnVectorBatch* column_vector_batch) {
+  const SparseUnionArray& sparse_union_array(
+      checked_cast<const SparseUnionArray&>(array));
+  auto batch = checked_cast<liborc::UnionVectorBatch*>(column_vector_batch);
+  std::size_t size = type->fields().size();
+  int64_t arrow_length = array.length();
+  int64_t running_arrow_offset = 0, running_orc_offset = orc_offset;
+  std::vector<int64_t> subarray_orc_offset(size, 0);
+  for (int64_t i = 0; i < orc_offset; i++) {
+    subarray_orc_offset[batch->tags[i]]++;
+  }
+  // First fill fields of ColumnVectorBatch
+  // For the parent type no nulls exist
+  for (; running_arrow_offset < arrow_length;
+       running_orc_offset++, running_arrow_offset++) {
+    int64_t arrowDummy = 0;
+    int tag = array->child_id(running_arrow_offset);
+    batch->tags[running_orc_offset] = tag;
+    batch->offsets[running_orc_offset] = running_orc_offset;
+    RETURN_NOT_OK(WriteBatch(type->field(tag)->type().get(), batch->children[tag],
+                             arrowDummy, subarray_orc_offset[tag],
+                             subarray_orc_offset[tag] + 1,
+                             array->field(tag)->Slice(arrowOffset, 1).get(), NULLPTR));
+  }
+  return Status::OK();
+}
+
 Status WriteBatch(const Array& array, int64_t orc_offset,
                   liborc::ColumnVectorBatch* column_vector_batch) {
   Type::type kind = array.type_id();
