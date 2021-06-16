@@ -124,6 +124,32 @@ Status AppendMapBatch(const liborc::Type* type,
   return Status::OK();
 }
 
+Status AppendUnionBatch(const liborc::Type* type,
+                        liborc::ColumnVectorBatch* column_vector_batch, int64_t offset,
+                        int64_t length, ArrayBuilder* abuilder) {
+  auto builder = checked_cast<SparseUnionBuilder*>(abuilder);
+  auto batch = checked_cast<liborc::UnionVectorBatch*>(column_vector_batch);
+  int num_fields = type->num_fields();
+  const bool has_nulls = batch->hasNulls;
+  for (int64_t i = offset; i < length + offset; i++) {
+    if (!has_nulls || batch->notNull[i]) {
+      unsigned char orc_tag = batch->tags[i];
+      auto arrow_tag = std::static_cast<int8_t>(orc_tag);
+      RETURN_NOT_OK(builder->Append(arrow_tag));
+      RETURN_NOT_OK(AppendBatch(type->field(arrow_tag), batch->children[orc_tag], i, 1,
+                                builder->child(arrow_tag)));
+      for (int i = 0; i < num_fields; i++) {
+        if (i != arrow_tag) {
+          RETURN_NOT_OK(builder->child(i)->AppendEmptyValue());
+        }
+      }
+    } else {
+      RETURN_NOT_OK(builder->AppendNull());
+    }
+  }
+  return Status::OK();
+}
+
 template <class BuilderType, class BatchType, class ElemType>
 Status AppendNumericBatch(liborc::ColumnVectorBatch* column_vector_batch, int64_t offset,
                           int64_t length, ArrayBuilder* abuilder) {
@@ -329,6 +355,8 @@ Status AppendBatch(const liborc::Type* type, liborc::ColumnVectorBatch* batch,
       return AppendTimestampBatch(batch, offset, length, builder);
     case liborc::DECIMAL:
       return AppendDecimalBatch(type, batch, offset, length, builder);
+    case liborc::UNION:
+      return AppendUnionBatch(type, batch, offset, length, builder);
     default:
       return Status::NotImplemented("Not implemented type kind: ", kind);
   }
@@ -360,6 +388,7 @@ Result<std::shared_ptr<Array>> NormalizeArray(const std::shared_ptr<Array>& arra
           const std::shared_ptr<Buffer> child_bitmap = child->null_bitmap();
           std::shared_ptr<Buffer> final_child_bitmap;
           if (child_bitmap == nullptr) {
+            // TODO: What if the child is of one of the union types?
             final_child_bitmap = bitmap;
           } else {
             ARROW_ASSIGN_OR_RAISE(
@@ -408,6 +437,41 @@ Result<std::shared_ptr<Array>> NormalizeArray(const std::shared_ptr<Array>& arra
       return std::make_shared<MapArray>(map_array->type(), map_array->length(),
                                         map_array->value_offsets(), key_array, item_array,
                                         map_array->null_bitmap());
+    }
+    case Type::type::DENSE_UNION: {
+      auto dense_union_array = checked_pointer_cast<DenseUnionArray>(array);
+      auto dense_union_type = checked_pointer_cast<DenseUnionType>(array->type());
+      int num_fields = dense_union_type->num_fields();
+      std::vector<std::shared_ptr<Array>> new_children(num_fields, nullptr);
+      auto child_id_builder = std::make_shared<Int64Builder>();
+      std::shared_ptr<Array> child_id_array;
+      for (int i = 0; i < num_fields; i++) {
+        ARROW_ASSIGN_OR_RAISE(new_children[i],
+                              NormalizeArray(dense_union_array->field(i)));
+        RETURN_NOT_OK(child_id_builder->Append(dense_union_array->child_id(i)));
+      }
+      RETURN_NOT_OK(child_id_builder->Finish(&child_id_array));
+      // TODO: Do we need the offsets?
+      std::shared_ptr<Array> value_offsets_array = std::make_shared<Int32Array>(
+          dense_union_array->length(), dense_union_array->value_offsets());
+      // ORC union children don't have field names so we don't mind losing them now.
+      return DenseUnionArray::Make(*child_id_array, *value_offsets_array, new_children);
+    }
+    case Type::type::SPARSE_UNION: {
+      auto sparse_union_array = checked_pointer_cast<SparseUnionArray>(array);
+      auto sparse_union_type = checked_pointer_cast<SparseUnionType>(array->type());
+      int num_fields = sparse_union_type->num_fields();
+      std::vector<std::shared_ptr<Array>> new_children(num_fields, nullptr);
+      auto child_id_builder = std::make_shared<Int64Builder>();
+      std::shared_ptr<Array> child_id_array;
+      for (int i = 0; i < num_fields; i++) {
+        ARROW_ASSIGN_OR_RAISE(new_children[i],
+                              NormalizeArray(sparse_union_array->field(i)));
+        RETURN_NOT_OK(child_id_builder->Append(sparse_union_array->child_id(i)));
+      }
+      RETURN_NOT_OK(child_id_builder->Finish(&child_id_array));
+      // ORC union children don't have field names so we don't mind losing them now.
+      return SparseUnionArray::Make(*child_id_array, new_children);
     }
     default: {
       return array;
@@ -739,11 +803,15 @@ Status WriteDenseUnionBatch(const Array& array, int64_t orc_offset,
                             liborc::ColumnVectorBatch* column_vector_batch) {
   const DenseUnionArray& dense_union_array(checked_cast<const DenseUnionArray&>(array));
   auto batch = checked_cast<liborc::UnionVectorBatch*>(column_vector_batch);
-  std::size_t size = type->fields().size();
+  std::size_t size = dense_union_array.type()->fields().size();
   int64_t arrow_length = array.length();
   int64_t running_arrow_offset = 0, running_orc_offset = orc_offset;
-  std::vector<int64_t> subarray_orc_offset(size, 0), subarray_arrow_offset(size, -1),
-      subarray_element_count(size, 0);
+  std::vector<int64_t> subarray_orc_offset(size, 0);
+  if (orc_offset == 0) {
+    batch->offsets[0] = 0;
+  }
+  // Arrow-generated UNION batches should have no nulls
+  batch->hasNulls = false;
   for (int64_t i = 0; i < orc_offset; i++) {
     subarray_orc_offset[batch->tags[i]]++;
   }
@@ -751,21 +819,15 @@ Status WriteDenseUnionBatch(const Array& array, int64_t orc_offset,
   // For the parent type no nulls exist
   for (; running_arrow_offset < arrow_length;
        running_orc_offset++, running_arrow_offset++) {
-    int tag = array.child_id(running_arrow_offset);
+    int tag = dense_union_array.child_id(running_arrow_offset);
     batch->tags[running_orc_offset] = tag;
-    batch->offsets[running_orc_offset] = running_orc_offset;
-    subarray_element_count[tag]++;
-    if (subarray_arrow_offset[tag] == -1) {
-      subarray_arrow_offset[tag] = array.value_offset(running_arrow_offset);
-    }
-  }
-  // Fill the fields
-  for (std::size_t i = 0; i < size; i++) {
-    batch->fields[i]->resize(orc_offset + arrow_length);
-    if (subarray_arrow_offset[i] >= 0) {
-      RETURN_NOT_OK(
-          WriteBatch(*(dense_union_array->field(i)), orc_offset, batch->fields[i]));
-    }
+    batch->offsets[running_orc_offset] = subarray_orc_offset[tag];
+    RETURN_NOT_OK(
+        WriteBatch(*(dense_union_array.field(tag)->Slice(
+                       dense_union_array.value_offset(running_arrow_offset), 1)),
+                   subarray_orc_offset[tag], batch->children[tag]));
+    subarray_orc_offset[tag]++;
+    batch->children[tag]->resize(subarray_orc_offset[tag]);
   }
   return Status::OK();
 }
@@ -775,10 +837,15 @@ Status WriteSparseUnionBatch(const Array& array, int64_t orc_offset,
   const SparseUnionArray& sparse_union_array(
       checked_cast<const SparseUnionArray&>(array));
   auto batch = checked_cast<liborc::UnionVectorBatch*>(column_vector_batch);
-  std::size_t size = type->fields().size();
+  std::size_t size = sparse_union_array.type()->fields().size();
   int64_t arrow_length = array.length();
   int64_t running_arrow_offset = 0, running_orc_offset = orc_offset;
   std::vector<int64_t> subarray_orc_offset(size, 0);
+  if (orc_offset == 0) {
+    batch->offsets[0] = 0;
+  }
+  // Arrow-generated UNION batches should have no nulls
+  batch->hasNulls = false;
   for (int64_t i = 0; i < orc_offset; i++) {
     subarray_orc_offset[batch->tags[i]]++;
   }
@@ -786,14 +853,14 @@ Status WriteSparseUnionBatch(const Array& array, int64_t orc_offset,
   // For the parent type no nulls exist
   for (; running_arrow_offset < arrow_length;
        running_orc_offset++, running_arrow_offset++) {
-    int64_t arrowDummy = 0;
-    int tag = array->child_id(running_arrow_offset);
+    int tag = sparse_union_array.child_id(running_arrow_offset);
     batch->tags[running_orc_offset] = tag;
-    batch->offsets[running_orc_offset] = running_orc_offset;
-    RETURN_NOT_OK(WriteBatch(type->field(tag)->type().get(), batch->children[tag],
-                             arrowDummy, subarray_orc_offset[tag],
-                             subarray_orc_offset[tag] + 1,
-                             array->field(tag)->Slice(arrowOffset, 1).get(), NULLPTR));
+    batch->offsets[running_orc_offset] = subarray_orc_offset[tag];
+    RETURN_NOT_OK(
+        WriteBatch(*(sparse_union_array.field(tag)->Slice(running_arrow_offset, 1)),
+                   subarray_orc_offset[tag], batch->children[tag]));
+    subarray_orc_offset[tag]++;
+    batch->children[tag]->resize(subarray_orc_offset[tag]);
   }
   return Status::OK();
 }
@@ -883,6 +950,10 @@ Status WriteBatch(const Array& array, int64_t orc_offset,
       return WriteListBatch<FixedSizeListArray>(array, orc_offset, column_vector_batch);
     case Type::type::MAP:
       return WriteMapBatch(array, orc_offset, column_vector_batch);
+    case Type::type::DENSE_UNION:
+      return WriteDenseUnionBatch(array, orc_offset, column_vector_batch);
+    case Type::type::SPARSE_UNION:
+      return WriteSparseUnionBatch(array, orc_offset, column_vector_batch);
     default: {
       return Status::NotImplemented("Unknown or unsupported Arrow type: ",
                                     array.type()->ToString());

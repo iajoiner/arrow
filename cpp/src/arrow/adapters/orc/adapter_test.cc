@@ -279,21 +279,59 @@ std::unique_ptr<liborc::Writer> CreateWriter(uint64_t stripe_size,
 }
 
 TEST(TestUnion, test) {
-  MemoryOutputStream mem_stream(DEFAULT_SMALL_MEM_STREAM_SIZE);
+  ORC_UNIQUE_PTR<liborc::OutputStream> out_stream =
+      liborc::writeLocalFile("/Users/karlkatzen/Documents/code/orc-files/my-file.orc");
   ORC_UNIQUE_PTR<liborc::Type> schema(
-      liborc::Type::buildTypeFromString("struct<x:uniontype<a:string,b:int>>"));
+      liborc::Type::buildTypeFromString("struct<x:uniontype<a:double,b:int>>"));
   liborc::WriterOptions options;
-  ORC_UNIQUE_PTR<liborc::Writer> writer = createWriter(*schema, &mem_stream, options);
+  ORC_UNIQUE_PTR<liborc::Writer> writer =
+      createWriter(*schema, out_stream.get(), options);
   int64_t batchSize = 4;
   ORC_UNIQUE_PTR<liborc::ColumnVectorBatch> batch = writer->createRowBatch(batchSize);
   liborc::StructVectorBatch* root =
       internal::checked_cast<liborc::StructVectorBatch*>(batch.get());
   liborc::UnionVectorBatch* x =
       internal::checked_cast<liborc::UnionVectorBatch*>(root->fields[0]);
-  liborc::StringVectorBatch* a =
-      internal::checked_cast<liborc::StringVectorBatch*>(x->children[0]);
+  liborc::DoubleVectorBatch* a =
+      internal::checked_cast<liborc::DoubleVectorBatch*>(x->children[0]);
   liborc::LongVectorBatch* b =
       internal::checked_cast<liborc::LongVectorBatch*>(x->children[1]);
+  a->data[0] = 1.5;
+  b->data[0] = 2;
+  a->data[1] = 2.5;
+  // b->data[1] = 3;
+  a->data[2] = 3.5;
+  // b->data[2] = 4;
+  // a->data[3] = 4.5;
+  // b->data[3] = 5;
+  a->notNull[0] = false;
+  a->notNull[1] = true;
+  a->notNull[2] = false;
+  b->notNull[0] = false;
+  // b->notNull[1] = true;
+  // x->notNull[0] = false;
+  // x->notNull[1] = false;
+  // x->notNull[2] = true;
+  // x->notNull[3] = false;
+  // x->notNull[4] = true;
+  x->tags[0] = 0;
+  x->tags[1] = 1;
+  x->tags[2] = 0;
+  x->tags[3] = 0;
+  //x->tags[4] = 1;
+  x->offsets[0] = 0;
+  x->offsets[1] = 0;
+  x->offsets[2] = 1;
+  x->offsets[3] = 2;
+  //x->offsets[4] = 1;
+  x->hasNulls = false;
+  a->hasNulls = true;
+  b->hasNulls = true;
+  root->numElements = 4;
+  a->numElements = 3;
+  b->numElements = 1;
+  writer->add(*batch);
+  writer->close();
 }
 
 TEST(TestAdapterRead, ReadIntAndStringFileMultipleStripes) {
