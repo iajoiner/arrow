@@ -40,7 +40,7 @@ Arithmetic Functions
 --------------------
 
 By default these functions do not detect overflow. Each function is also
-available in an overflow-checking variant, suffixed ``_checked``, which 
+available in an overflow-checking variant, suffixed ``_checked``, which
 throws an ``ArrowInvalid`` exception when overflow is detected.
 
 .. autosummary::
@@ -75,6 +75,14 @@ they return ``null``.
    less_equal
    not_equal
 
+These functions take any number of arguments of a numeric or temporal type.
+
+.. autosummary::
+   :toctree: ../generated/
+
+   max_element_wise
+   min_element_wise
+
 Logical Functions
 -----------------
 
@@ -96,11 +104,11 @@ logic variants are provided (suffixed ``_kleene``). See User Guide for details.
 String Predicates
 -----------------
 
-In these functions an empty string emits false in the output. For ASCII 
+In these functions an empty string emits false in the output. For ASCII
 variants (prefixed ``ascii_``) a string element with non-ASCII characters
 emits false in the output.
 
-The first set of functions emit true if the input contains only 
+The first set of functions emit true if the input contains only
 characters of a given class.
 
 .. autosummary::
@@ -132,7 +140,7 @@ in the string element.
    ascii_is_title
    utf8_is_title
 
-The third set of functions examines string elements on 
+The third set of functions examines string elements on
 a byte-by-byte basis.
 
 .. autosummary::
@@ -151,6 +159,23 @@ String Splitting
    ascii_split_whitespace
    utf8_split_whitespace
 
+String Component Extraction
+---------------------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   extract_regex
+
+String Joining
+--------------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   binary_join
+   binary_join_element_wise
+
 String Transforms
 -----------------
 
@@ -160,7 +185,13 @@ String Transforms
    ascii_lower
    ascii_reverse
    ascii_upper
+   binary_length
+   binary_replace_slice
+   replace_substring
+   replace_substring_regex
+   utf8_length
    utf8_lower
+   utf8_replace_slice
    utf8_reverse
    utf8_upper
 
@@ -170,12 +201,16 @@ Containment tests
 .. autosummary::
    :toctree: ../generated/
 
+   count_substring
+   count_substring_regex
+   ends_with
    find_substring
    index_in
    is_in
    match_like
    match_substring
    match_substring_regex
+   starts_with
 
 Conversions
 -----------
@@ -222,6 +257,10 @@ Structural Transforms
 
    binary_length
    fill_null
+   if_else
+   is_finite
+   is_inf
+   is_nan
    is_null
    is_valid
    list_value_length
