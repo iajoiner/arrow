@@ -129,14 +129,15 @@ Status AppendUnionBatch(const liborc::Type* type,
                         int64_t length, ArrayBuilder* abuilder) {
   auto builder = checked_cast<SparseUnionBuilder*>(abuilder);
   auto batch = checked_cast<liborc::UnionVectorBatch*>(column_vector_batch);
-  int num_fields = type->num_fields();
+  int num_fields = builder->type()->num_fields();
   const bool has_nulls = batch->hasNulls;
   for (int64_t i = offset; i < length + offset; i++) {
     if (!has_nulls || batch->notNull[i]) {
       unsigned char orc_tag = batch->tags[i];
-      auto arrow_tag = std::static_cast<int8_t>(orc_tag);
+      auto arrow_tag = static_cast<int8_t>(orc_tag);
+      auto orc_child_offset = static_cast<int32_t>(batch->offsets[i]);
       RETURN_NOT_OK(builder->Append(arrow_tag));
-      RETURN_NOT_OK(AppendBatch(type->field(arrow_tag), batch->children[orc_tag], i, 1,
+      RETURN_NOT_OK(AppendBatch(type->getSubtype(orc_tag), batch->children[orc_tag], orc_child_offset, 1,
                                 builder->child(arrow_tag)));
       for (int i = 0; i < num_fields; i++) {
         if (i != arrow_tag) {

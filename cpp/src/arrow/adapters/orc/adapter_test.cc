@@ -28,6 +28,7 @@
 #include "arrow/buffer_builder.h"
 #include "arrow/chunked_array.h"
 #include "arrow/compute/cast.h"
+#include "arrow/io/file.h"  //Init test only
 #include "arrow/io/interfaces.h"
 #include "arrow/io/memory.h"
 #include "arrow/status.h"
@@ -278,6 +279,19 @@ std::unique_ptr<liborc::Writer> CreateWriter(uint64_t stripe_size,
   options.setRowIndexStride(0);
   return liborc::createWriter(type, stream, options);
 }
+TEST(TestUnionRead, test0) {
+  EXPECT_OK_AND_ASSIGN(
+      auto in_stream,
+      io::ReadableFile::Open("/Users/karlkatzen/Documents/code/orc-files/union1.orc"));
+  std::unique_ptr<adapters::orc::ORCFileReader> reader;
+  ASSERT_TRUE(adapters::orc::ORCFileReader::Open(
+                  std::static_pointer_cast<io::RandomAccessFile>(in_stream),
+                  default_memory_pool(), &reader)
+                  .ok());
+  std::shared_ptr<Table> table;
+  ARROW_EXPECT_OK(reader->Read(&table));
+  RecordProperty("table", table->ToString());
+}
 
 TEST(TestUnion, test) {
   ORC_UNIQUE_PTR<liborc::OutputStream> out_stream =
@@ -319,12 +333,12 @@ TEST(TestUnion, test) {
   x->tags[1] = 1;
   x->tags[2] = 0;
   x->tags[3] = 0;
-  //x->tags[4] = 1;
+  // x->tags[4] = 1;
   x->offsets[0] = 0;
   x->offsets[1] = 0;
   x->offsets[2] = 1;
   x->offsets[3] = 2;
-  //x->offsets[4] = 1;
+  // x->offsets[4] = 1;
   x->hasNulls = false;
   a->hasNulls = true;
   b->hasNulls = true;
