@@ -93,7 +93,7 @@ namespace orc {
 namespace {
 
 // The following are required by ORC to be uint64_t
-constexpr uint64_t kOrcWriterBatchSize = 128 * 1024;
+constexpr uint64_t kOrcWriterBatchSize = 1;//128 * 1024;
 constexpr uint64_t kOrcNaturalWriteSize = 128 * 1024;
 
 using internal::checked_cast;

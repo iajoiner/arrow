@@ -371,7 +371,9 @@ using internal::checked_pointer_cast;
 Status WriteBatch(const Array& parray, int64_t orc_offset,
                   liborc::ColumnVectorBatch* column_vector_batch);
 
-// Make sure children of StructArray have appropriate null.
+// Make sure an array has been recursively transformed in the following ways:
+// 1. All (grand)children of null struct entries are null
+// 2. Logical and physical type codes of union types agree
 Result<std::shared_ptr<Array>> NormalizeArray(const std::shared_ptr<Array>& array) {
   Type::type kind = array->type_id();
   switch (kind) {
@@ -442,17 +444,19 @@ Result<std::shared_ptr<Array>> NormalizeArray(const std::shared_ptr<Array>& arra
     case Type::type::DENSE_UNION: {
       auto dense_union_array = checked_pointer_cast<DenseUnionArray>(array);
       auto dense_union_type = checked_pointer_cast<DenseUnionType>(array->type());
+      int64_t length = array->length();
       int num_fields = dense_union_type->num_fields();
       std::vector<std::shared_ptr<Array>> new_children(num_fields, nullptr);
-      auto child_id_builder = std::make_shared<Int64Builder>();
+      auto child_id_builder = std::make_shared<Int8Builder>();
       std::shared_ptr<Array> child_id_array;
       for (int i = 0; i < num_fields; i++) {
         ARROW_ASSIGN_OR_RAISE(new_children[i],
                               NormalizeArray(dense_union_array->field(i)));
-        RETURN_NOT_OK(child_id_builder->Append(dense_union_array->child_id(i)));
+      }
+      for (int64_t i = 0; i < length; i++) {
+        RETURN_NOT_OK(child_id_builder->Append(static_cast<int8_t>(dense_union_array->child_id(i))));
       }
       RETURN_NOT_OK(child_id_builder->Finish(&child_id_array));
-      // TODO: Do we need the offsets?
       std::shared_ptr<Array> value_offsets_array = std::make_shared<Int32Array>(
           dense_union_array->length(), dense_union_array->value_offsets());
       // ORC union children don't have field names so we don't mind losing them now.
@@ -461,14 +465,17 @@ Result<std::shared_ptr<Array>> NormalizeArray(const std::shared_ptr<Array>& arra
     case Type::type::SPARSE_UNION: {
       auto sparse_union_array = checked_pointer_cast<SparseUnionArray>(array);
       auto sparse_union_type = checked_pointer_cast<SparseUnionType>(array->type());
+      int64_t length = array->length();
       int num_fields = sparse_union_type->num_fields();
       std::vector<std::shared_ptr<Array>> new_children(num_fields, nullptr);
-      auto child_id_builder = std::make_shared<Int64Builder>();
+      auto child_id_builder = std::make_shared<Int8Builder>();
       std::shared_ptr<Array> child_id_array;
       for (int i = 0; i < num_fields; i++) {
         ARROW_ASSIGN_OR_RAISE(new_children[i],
                               NormalizeArray(sparse_union_array->field(i)));
-        RETURN_NOT_OK(child_id_builder->Append(sparse_union_array->child_id(i)));
+      }
+      for (int64_t i = 0; i < length; i++) {
+        RETURN_NOT_OK(child_id_builder->Append(static_cast<int8_t>(sparse_union_array->child_id(i))));
       }
       RETURN_NOT_OK(child_id_builder->Finish(&child_id_array));
       // ORC union children don't have field names so we don't mind losing them now.
@@ -1173,7 +1180,7 @@ Status GetArrowType(const liborc::Type* type, std::shared_ptr<DataType>* out) {
       for (int child = 0; child < subtype_count; ++child) {
         std::shared_ptr<DataType> elem_type;
         RETURN_NOT_OK(GetArrowType(type->getSubtype(child), &elem_type));
-        fields.push_back(field("_union_" + std::to_string(child), elem_type));
+        fields.push_back(field(std::to_string(child), elem_type));
         type_codes.push_back(static_cast<int8_t>(child));
       }
       *out = sparse_union(fields, type_codes);

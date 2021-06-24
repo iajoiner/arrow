@@ -282,7 +282,7 @@ std::unique_ptr<liborc::Writer> CreateWriter(uint64_t stripe_size,
 TEST(TestUnionRead, test0) {
   EXPECT_OK_AND_ASSIGN(
       auto in_stream,
-      io::ReadableFile::Open("/Users/karlkatzen/Documents/code/orc-files/union1.orc"));
+      io::ReadableFile::Open("/Users/karlkatzen/Documents/code/orc-files/union1-alt.orc"));
   std::unique_ptr<adapters::orc::ORCFileReader> reader;
   ASSERT_TRUE(adapters::orc::ORCFileReader::Open(
                   std::static_pointer_cast<io::RandomAccessFile>(in_stream),
@@ -291,6 +291,12 @@ TEST(TestUnionRead, test0) {
   std::shared_ptr<Table> table;
   ARROW_EXPECT_OK(reader->Read(&table));
   RecordProperty("table", table->ToString());
+  EXPECT_OK_AND_ASSIGN(auto out_stream,
+      io::FileOutputStream::Open("/Users/karlkatzen/Documents/code/orc-files/union1-alt2.orc"));
+  EXPECT_OK_AND_ASSIGN(auto writer,
+                       adapters::orc::ORCFileWriter::Open(std::static_pointer_cast<io::OutputStream>(out_stream).get()));
+  ARROW_EXPECT_OK(writer->Write(*table));
+  ARROW_EXPECT_OK(writer->Close());
 }
 
 TEST(TestUnion, test) {
@@ -449,6 +455,7 @@ TEST(TestAdapterRead, ReadIntAndStringFileMultipleStripes) {
 
 class TestORCWriterTrivialNoConversion : public ::testing::Test {
  public:
+ //We haven't implemented the empty union types since ORC doesn't allow them
   TestORCWriterTrivialNoConversion() {
     table_schema = schema(
         {field("bool", boolean()), field("int8", int8()), field("int16", int16()),
@@ -460,7 +467,9 @@ class TestORCWriterTrivialNoConversion : public ::testing::Test {
          field("struct", struct_({field("a", utf8()), field("b", int64())})),
          field("list", list(int32())),
          field("lsl", list(struct_({field("lsl0", list(int32()))}))),
-         field("map", map(utf8(), utf8()))});
+         field("map", map(utf8(), utf8())),
+         field("sparse_union", 
+         sparse_union({field("0", utf8()), field("1", int64())}))});
   }
 
  protected:
@@ -485,14 +494,22 @@ class TestORCWriterTrivialWithConversion : public ::testing::Test {
          field("fixed_size_binary0", fixed_size_binary(0)),
          field("fixed_size_binary", fixed_size_binary(5)),
          field("large_list", large_list(int32())),
-         field("fixed_size_list", fixed_size_list(int32(), 3))}),
+         field("fixed_size_list", fixed_size_list(int32(), 3)),
+         field("dense_union", 
+         dense_union({field("a", utf8()), field("b", int64())},{125, 1})),
+         field("sparse_union", 
+         sparse_union({field("a", utf8()), field("b", int64())},{54, 125}))}),
     output_schema = schema(
         {field("date64", timestamp(TimeUnit::NANO)),
          field("ts0", timestamp(TimeUnit::NANO)), field("ts1", timestamp(TimeUnit::NANO)),
          field("ts2", timestamp(TimeUnit::NANO)), field("large_string", utf8()),
          field("large_binary", binary()), field("fixed_size_binary0", binary()),
          field("fixed_size_binary", binary()), field("large_list", list(int32())),
-         field("fixed_size_list", list(int32()))});
+         field("fixed_size_list", list(int32())),
+         field("dense_union", 
+         sparse_union({field("0", utf8()), field("1", int64())})),
+         field("sparse_union", 
+         sparse_union({field("0", utf8()), field("1", int64())}))});
   }
 
  protected:
@@ -753,6 +770,14 @@ TEST_F(TestORCWriterSingleArray, WriteListOfMap) {
   std::shared_ptr<Array> value_array =
       rand.Map(value_key_array, value_item_array, 2 * num_rows, 0.2);
   std::shared_ptr<Array> array = rand.List(*value_array, num_rows, 0.4);
+  AssertArrayWriteReadEqual(array, array, kDefaultSmallMemStreamSize * 10);
+}
+
+TEST_F(TestORCWriterSingleArray, WriteSparseUnion) {
+  const int64_t num_rows = 1234;
+  auto subarray0 = rand.ArrayOf(int32(), num_rows, 0.2);
+  auto subarray1 = rand.ArrayOf(utf8(), num_rows, 0.2);
+  std::shared_ptr<Array> array = rand.SparseUnion({subarray0, subarray1}, num_rows);
   AssertArrayWriteReadEqual(array, array, kDefaultSmallMemStreamSize * 10);
 }
 
