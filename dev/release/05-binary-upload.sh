@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -64,6 +64,7 @@ fi
 # To deactivate one category, deactivate the category and all of its dependents.
 # To explicitly select one category, set UPLOAD_DEFAULT=0 UPLOAD_X=1.
 : ${UPLOAD_DEFAULT:=1}
+: ${UPLOAD_ALMALINUX:=${UPLOAD_DEFAULT}}
 : ${UPLOAD_AMAZON_LINUX_RPM:=${UPLOAD_DEFAULT}}
 : ${UPLOAD_AMAZON_LINUX_YUM:=${UPLOAD_DEFAULT}}
 : ${UPLOAD_CENTOS_RPM:=${UPLOAD_DEFAULT}}
@@ -78,6 +79,10 @@ fi
 rake_tasks=()
 apt_targets=()
 yum_targets=()
+if [ ${UPLOAD_ALMALINUX} -gt 0 ]; then
+  rake_tasks+=(yum:rc)
+  yum_targets+=(almalinux)
+fi
 if [ ${UPLOAD_AMAZON_LINUX_RPM} -gt 0 ]; then
   rake_tasks+=(rpm)
   yum_targets+=(amazon-linux)
@@ -129,6 +134,7 @@ docker_run \
   rake \
     "${rake_tasks[@]}" \
     APT_TARGETS=$(IFS=,; echo "${apt_targets[*]}") \
+    ARTIFACTORY_API_KEY="${ARTIFACTORY_API_KEY}" \
     ARTIFACTS_DIR="${tmp_dir}/artifacts" \
     RC=${rc} \
     VERSION=${version} \

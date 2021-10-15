@@ -759,6 +759,16 @@ cdef class MemoryMappedFile(NativeFile):
 
     @staticmethod
     def create(path, size):
+        """
+        Create a MemoryMappedFile
+
+        Parameters
+        ----------
+        path : str
+            Where to create the file.
+        size : int
+            Size of the memory mapped file.
+        """
         cdef:
             shared_ptr[CMemoryMappedFile] handle
             c_string c_path = encode_file_path(path)
@@ -1282,21 +1292,20 @@ cdef class CompressedOutputStream(NativeFile):
 
     Parameters
     ----------
-    stream : pa.NativeFile
+    stream : string, path, pa.NativeFile, or file-like object
         Input stream object to wrap with the compression.
     compression : str
         The compression type ("bz2", "brotli", "gzip", "lz4" or "zstd").
     """
 
-    def __init__(self, NativeFile stream, str compression not None):
+    def __init__(self, object stream, str compression not None):
         cdef:
             Codec codec = Codec(compression)
+            shared_ptr[COutputStream] c_writer
             shared_ptr[CCompressedOutputStream] compressed_stream
+        get_writer(stream, &c_writer)
         compressed_stream = GetResultValue(
-            CCompressedOutputStream.Make(
-                codec.unwrap(),
-                stream.get_output_stream()
-            )
+            CCompressedOutputStream.Make(codec.unwrap(), c_writer)
         )
         self.set_output_stream(<shared_ptr[COutputStream]> compressed_stream)
         self.is_writable = True
@@ -1308,6 +1317,20 @@ ctypedef CRandomAccessFile* _RandomAccessFilePtr
 
 
 cdef class BufferedInputStream(NativeFile):
+    """
+    An input stream that performs buffered reads from
+    an unbuffered input stream, which can mitigate the overhead
+    of many small reads in some cases.
+
+    Parameters
+    ----------
+    stream : NativeFile
+        The input stream to wrap with the buffer
+    buffer_size : int
+        Size of the temporary read buffer.
+    memory_pool : MemoryPool
+        The memory pool used to allocate the buffer.
+    """
 
     def __init__(self, NativeFile stream, int buffer_size,
                  MemoryPool memory_pool=None):
@@ -1358,6 +1381,20 @@ cdef class BufferedInputStream(NativeFile):
 
 
 cdef class BufferedOutputStream(NativeFile):
+    """
+    An output stream that performs buffered reads from
+    an unbuffered output stream, which can mitigate the overhead
+    of many small writes in some cases.
+
+    Parameters
+    ----------
+    stream : NativeFile
+        The writable output stream to wrap with the buffer
+    buffer_size : int
+        Size of the buffer that should be added.
+    memory_pool : MemoryPool
+        The memory pool used to allocate the buffer.
+    """
 
     def __init__(self, NativeFile stream, int buffer_size,
                  MemoryPool memory_pool=None):
@@ -1407,6 +1444,16 @@ cdef void _cb_transform(transform_func, const shared_ptr[CBuffer]& src,
 
 
 cdef class TransformInputStream(NativeFile):
+    """
+    Transform an input stream.
+
+    Parameters
+    ----------
+    stream : NativeFile
+        The stream to transform.
+    transform_func : callable
+        The transformation to apply.
+    """
 
     def __init__(self, NativeFile stream, transform_func):
         self.set_input_stream(TransformInputStream.make_native(
@@ -1437,6 +1484,20 @@ class Transcoder:
 
 
 def transcoding_input_stream(stream, src_encoding, dest_encoding):
+    """
+    Add a transcoding transformation to the stream.
+    Incoming data will be decoded according to ``src_encoding`` and
+    then re-encoded according to ``dest_encoding``.
+
+    Parameters
+    ----------
+    stream : NativeFile
+        The stream to which the transformation should be applied.
+    src_encoding : str
+        The codec to use when reading data data.
+    dest_encoding : str
+        The codec to use for emitted data.
+    """
     src_codec = codecs.lookup(src_encoding)
     dest_codec = codecs.lookup(dest_encoding)
     if src_codec.name == dest_codec.name:
@@ -1465,6 +1526,11 @@ cdef shared_ptr[CInputStream] native_transcoding_input_stream(
 def py_buffer(object obj):
     """
     Construct an Arrow buffer from a Python bytes-like or buffer-like object
+
+    Parameters
+    ----------
+    obj : object
+        the object from which the buffer should be constructed.
     """
     cdef shared_ptr[CBuffer] buf
     buf = GetResultValue(PyBuffer.FromPyObject(obj))
@@ -1479,6 +1545,18 @@ def foreign_buffer(address, size, base=None):
     The *base* object will be kept alive as long as this buffer is alive,
     including across language boundaries (for example if the buffer is
     referenced by C++ code).
+
+    Parameters
+    ----------
+    address : int
+        The starting address of the buffer. The address can
+        refer to both device or host memory but it must be
+        accessible from device after mapping it with
+        `get_device_address` method.
+    size : int
+        The size of device buffer in bytes.
+    base : {None, object}
+        Object that owns the referenced memory.
     """
     cdef:
         intptr_t c_addr = address
@@ -1626,6 +1704,40 @@ cdef class Codec(_Weakrefable):
         Type of compression codec to initialize, valid values are: 'gzip',
         'bz2', 'brotli', 'lz4' (or 'lz4_frame'), 'lz4_raw', 'zstd' and
         'snappy'.
+    compression_level : int, None
+        Optional parameter specifying how aggressively to compress.  The
+        possible ranges and effect of this parameter depend on the specific
+        codec chosen.  Higher values compress more but typically use more
+        resources (CPU/RAM).  Some codecs support negative values.
+
+        gzip
+            The compression_level maps to the memlevel parameter of
+            deflateInit2.  Higher levels use more RAM but are faster
+            and should have higher compression ratios.
+
+        bz2
+            The compression level maps to the blockSize100k parameter of
+            the BZ2_bzCompressInit function.  Higher levels use more RAM
+            but are faster and should have higher compression ratios.
+
+        brotli
+            The compression level maps to the BROTLI_PARAM_QUALITY
+            parameter.  Higher values are slower and should have higher
+            compression ratios.
+
+        lz4/lz4_frame/lz4_raw
+            The compression level parameter is not supported and must
+            be None
+
+        zstd
+            The compression level maps to the compressionLevel parameter
+            of ZSTD_initCStream.  Negative values are supported.  Higher
+            values are slower and should have higher compression ratios.
+
+        snappy
+            The compression level parameter is not supported and must
+            be None
+
 
     Raises
     ------
@@ -1633,9 +1745,14 @@ cdef class Codec(_Weakrefable):
         If invalid compression value is passed.
     """
 
-    def __init__(self, str compression not None):
+    def __init__(self, str compression not None, compression_level=None):
         cdef CCompressionType typ = _ensure_compression(compression)
-        self.wrapped = move(GetResultValue(CCodec.Create(typ)))
+        if compression_level is not None:
+            self.wrapped = shared_ptr[CCodec](move(GetResultValue(
+                CCodec.CreateWithLevel(typ, compression_level))))
+        else:
+            self.wrapped = shared_ptr[CCodec](move(GetResultValue(
+                CCodec.Create(typ))))
 
     cdef inline CCodec* unwrap(self) nogil:
         return self.wrapped.get()
@@ -1670,9 +1787,9 @@ cdef class Codec(_Weakrefable):
 
         Parameters
         ----------
-        compression: str
-             Type of compression codec, valid values are: gzip, bz2, brotli,
-             lz4, zstd and snappy.
+        compression : str
+             Type of compression codec,
+             refer to Codec docstring for a list of supported ones.
 
         Returns
         -------
@@ -1681,9 +1798,73 @@ cdef class Codec(_Weakrefable):
         cdef CCompressionType typ = _ensure_compression(compression)
         return CCodec.IsAvailable(typ)
 
+    @staticmethod
+    def supports_compression_level(str compression not None):
+        """
+        Returns true if the compression level parameter is supported
+        for the given codec.
+
+        Parameters
+        ----------
+        compression : str
+            Type of compression codec,
+            refer to Codec docstring for a list of supported ones.
+        """
+        cdef CCompressionType typ = _ensure_compression(compression)
+        return CCodec.SupportsCompressionLevel(typ)
+
+    @staticmethod
+    def default_compression_level(str compression not None):
+        """
+        Returns the compression level that Arrow will use for the codec if
+        None is specified.
+
+        Parameters
+        ----------
+        compression : str
+            Type of compression codec,
+            refer to Codec docstring for a list of supported ones.
+        """
+        cdef CCompressionType typ = _ensure_compression(compression)
+        return GetResultValue(CCodec.DefaultCompressionLevel(typ))
+
+    @staticmethod
+    def minimum_compression_level(str compression not None):
+        """
+        Returns the smallest valid value for the compression level
+
+        Parameters
+        ----------
+        compression : str
+            Type of compression codec,
+            refer to Codec docstring for a list of supported ones.
+        """
+        cdef CCompressionType typ = _ensure_compression(compression)
+        return GetResultValue(CCodec.MinimumCompressionLevel(typ))
+
+    @staticmethod
+    def maximum_compression_level(str compression not None):
+        """
+        Returns the largest valid value for the compression level
+
+        Parameters
+        ----------
+        compression : str
+            Type of compression codec,
+            refer to Codec docstring for a list of supported ones.
+        """
+        cdef CCompressionType typ = _ensure_compression(compression)
+        return GetResultValue(CCodec.MaximumCompressionLevel(typ))
+
     @property
     def name(self):
+        """Returns the name of the codec"""
         return frombytes(self.unwrap().name())
+
+    @property
+    def compression_level(self):
+        """Returns the compression level parameter of the codec"""
+        return frombytes(self.unwrap().compression_level())
 
     def compress(self, object buf, asbytes=False, memory_pool=None):
         """
@@ -1858,15 +2039,15 @@ def input_stream(source, compression='detect', buffer_size=None):
 
     Parameters
     ----------
-    source: str, Path, buffer, file-like object, ...
+    source : str, Path, buffer, file-like object, ...
         The source to open for reading.
-    compression: str optional, default 'detect'
+    compression : str optional, default 'detect'
         The compression algorithm to use for on-the-fly decompression.
         If "detect" and source is a file path, then compression will be
         chosen based on the file extension.
         If None, no compression will be applied.
         Otherwise, a well-known algorithm name must be supplied (e.g. "gzip").
-    buffer_size: int, default None
+    buffer_size : int, default None
         If None or 0, no buffering will happen. Otherwise the size of the
         temporary read buffer.
     """
@@ -1910,15 +2091,15 @@ def output_stream(source, compression='detect', buffer_size=None):
 
     Parameters
     ----------
-    source: str, Path, buffer, file-like object, ...
+    source : str, Path, buffer, file-like object, ...
         The source to open for writing.
-    compression: str optional, default 'detect'
+    compression : str optional, default 'detect'
         The compression algorithm to use for on-the-fly compression.
         If "detect" and source is a file path, then compression will be
         chosen based on the file extension.
         If None, no compression will be applied.
         Otherwise, a well-known algorithm name must be supplied (e.g. "gzip").
-    buffer_size: int, default None
+    buffer_size : int, default None
         If None or 0, no buffering will happen. Otherwise the size of the
         temporary write buffer.
     """

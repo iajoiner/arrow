@@ -38,11 +38,27 @@ test_that("Schema print method", {
   )
 })
 
+test_that("Schema with non-nullable fields", {
+  expect_output(
+    print(schema(field("b", double()),
+                 field("c", bool(), nullable = FALSE),
+                 field("d", string()))),
+    paste(
+      "Schema",
+      "b: double",
+      "c: bool not null",
+      "d: string",
+      sep = "\n"
+    ),
+    fixed = TRUE
+  )
+})
+
 test_that("Schema $GetFieldByName", {
   schm <- schema(b = double(), c = string())
   expect_equal(schm$GetFieldByName("b"), field("b", double()))
   expect_null(schm$GetFieldByName("f"))
-  # TODO: schema(b = double(), b = string())$GetFieldByName("b")
+  # TODO: schema(b = double(), b = string())$GetFieldByName("b") # nolint
   # also returns NULL and probably should error bc duplicated names
 })
 
@@ -153,14 +169,14 @@ test_that("Input validation when creating a table with a schema", {
 
 test_that("Schema$Equals", {
   a <- schema(b = double(), c = bool())
-  b <- a$WithMetadata(list(some="metadata"))
+  b <- a$WithMetadata(list(some = "metadata"))
 
   # different metadata
   expect_failure(expect_equal(a, b))
   expect_false(a$Equals(b, check_metadata = TRUE))
 
   # Metadata not checked
-  expect_equivalent(a, b)
+  expect_equal(a, b, ignore_attr = TRUE)
 
   # Non-schema object
   expect_false(a$Equals(42))
@@ -173,4 +189,32 @@ test_that("unify_schemas", {
     unify_schemas(a, z),
     schema(b = double(), c = bool(), k = utf8())
   )
+  # returns NULL when any arg is NULL
+  expect_null(
+    unify_schemas(a, NULL, z)
+  )
+  # returns NULL when all args are NULL
+  expect_null(
+    unify_schemas(NULL, NULL)
+  )
+  # errors when no args
+  expect_error(
+    unify_schemas(),
+    "Must provide at least one schema to unify"
+  )
+})
+
+test_that("Schema to C-interface", {
+  schema <- schema(b = double(), c = bool())
+
+  # export the schema via the C-interface
+  ptr <- allocate_arrow_schema()
+  schema$export_to_c(ptr)
+
+  # then import it and check that the roundtripped value is the same
+  circle <- Schema$import_from_c(ptr)
+  expect_equal(circle, schema)
+
+  # must clean up the pointer or we leak
+  delete_arrow_schema(ptr)
 })

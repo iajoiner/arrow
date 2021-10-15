@@ -73,6 +73,39 @@ struct NumericToStringCastFunctor {
 };
 
 // ----------------------------------------------------------------------
+// Temporal to String
+
+template <typename O, typename I>
+struct TemporalToStringCastFunctor {
+  using value_type = typename TypeTraits<I>::CType;
+  using BuilderType = typename TypeTraits<O>::BuilderType;
+  using FormatterType = StringFormatter<I>;
+
+  static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+    DCHECK(out->is_array());
+    const ArrayData& input = *batch[0].array();
+    ArrayData* output = out->mutable_array();
+    return Convert(ctx, input, output);
+  }
+
+  static Status Convert(KernelContext* ctx, const ArrayData& input, ArrayData* output) {
+    FormatterType formatter(input.type);
+    BuilderType builder(input.type, ctx->memory_pool());
+    RETURN_NOT_OK(VisitArrayDataInline<I>(
+        input,
+        [&](value_type v) {
+          return formatter(v, [&](util::string_view v) { return builder.Append(v); });
+        },
+        [&]() { return builder.AppendNull(); }));
+
+    std::shared_ptr<Array> output_array;
+    RETURN_NOT_OK(builder.Finish(&output_array));
+    *output = std::move(*output_array->data());
+    return Status::OK();
+  }
+};
+
+// ----------------------------------------------------------------------
 // Binary-like to binary-like
 //
 
@@ -148,7 +181,9 @@ Status CastBinaryToBinaryOffsets<int64_t, int32_t>(KernelContext* ctx,
 }
 
 template <typename O, typename I>
-Status BinaryToBinaryCastExec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+enable_if_base_binary<I, Status> BinaryToBinaryCastExec(KernelContext* ctx,
+                                                        const ExecBatch& batch,
+                                                        Datum* out) {
   DCHECK(out->is_array());
   const CastOptions& options = checked_cast<const CastState&>(*ctx->state()).options;
   const ArrayData& input = *batch[0].array();
@@ -165,6 +200,78 @@ Status BinaryToBinaryCastExec(KernelContext* ctx, const ExecBatch& batch, Datum*
   RETURN_NOT_OK(ZeroCopyCastExec(ctx, batch, out));
   return CastBinaryToBinaryOffsets<typename I::offset_type, typename O::offset_type>(
       ctx, input, out->mutable_array());
+}
+
+template <typename O, typename I>
+enable_if_t<std::is_same<I, FixedSizeBinaryType>::value &&
+                !std::is_same<O, FixedSizeBinaryType>::value,
+            Status>
+BinaryToBinaryCastExec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+  DCHECK(out->is_array());
+  const CastOptions& options = checked_cast<const CastState&>(*ctx->state()).options;
+  const ArrayData& input = *batch[0].array();
+  ArrayData* output = out->mutable_array();
+
+  if (O::is_utf8 && !options.allow_invalid_utf8) {
+    InitializeUTF8();
+
+    ArrayDataVisitor<I> visitor;
+    Utf8Validator validator;
+    RETURN_NOT_OK(visitor.Visit(input, &validator));
+  }
+
+  // Check for overflow
+  using output_offset_type = typename O::offset_type;
+  constexpr output_offset_type kMaxOffset =
+      std::numeric_limits<output_offset_type>::max();
+  const int32_t width =
+      checked_cast<const FixedSizeBinaryType&>(*input.type).byte_width();
+  const int64_t max_offset = width * input.length;
+  if (max_offset > kMaxOffset) {
+    return Status::Invalid("Failed casting from ", input.type->ToString(), " to ",
+                           output->type->ToString(), ": input array too large");
+  }
+
+  // Copy buffers over, then generate indices
+  output->length = input.length;
+  output->SetNullCount(input.null_count);
+  if (input.offset == output->offset) {
+    output->buffers[0] = input.buffers[0];
+  } else {
+    ARROW_ASSIGN_OR_RAISE(
+        output->buffers[0],
+        arrow::internal::CopyBitmap(ctx->memory_pool(), input.GetValues<uint8_t>(0, 0),
+                                    input.offset, input.length));
+  }
+  output->buffers[2] = input.buffers[1];
+  output_offset_type* offsets = output->GetMutableValues<output_offset_type>(1);
+
+  offsets[0] = static_cast<output_offset_type>(input.offset * width);
+  for (int64_t i = 0; i < input.length; i++) {
+    offsets[i + 1] = offsets[i] + width;
+  }
+  return Status::OK();
+}
+
+template <typename O, typename I>
+enable_if_t<std::is_same<I, FixedSizeBinaryType>::value &&
+                std::is_same<O, FixedSizeBinaryType>::value,
+            Status>
+BinaryToBinaryCastExec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+  DCHECK(out->is_array());
+  const CastOptions& options = checked_cast<const CastState&>(*ctx->state()).options;
+  const ArrayData& input = *batch[0].array();
+  const int32_t in_width =
+      checked_cast<const FixedSizeBinaryType&>(*input.type).byte_width();
+  const int32_t out_width =
+      checked_cast<const FixedSizeBinaryType&>(*options.to_type).byte_width();
+
+  if (in_width != out_width) {
+    return Status::Invalid("Failed casting from ", input.type->ToString(), " to ",
+                           options.to_type->ToString(), ": widths must match");
+  }
+
+  return ZeroCopyCastExec(ctx, batch, out);
 }
 
 #if defined(_MSC_VER)
@@ -192,13 +299,24 @@ void AddNumberToStringCasts(CastFunction* func) {
   }
 }
 
+template <typename OutType>
+void AddTemporalToStringCasts(CastFunction* func) {
+  auto out_ty = TypeTraits<OutType>::type_singleton();
+  for (const std::shared_ptr<DataType>& in_ty : TemporalTypes()) {
+    DCHECK_OK(func->AddKernel(
+        in_ty->id(), {in_ty}, out_ty,
+        TrivialScalarUnaryAsArraysExec(
+            GenerateTemporal<TemporalToStringCastFunctor, OutType>(*in_ty)),
+        NullHandling::COMPUTED_NO_PREALLOCATE));
+  }
+}
+
 template <typename OutType, typename InType>
 void AddBinaryToBinaryCast(CastFunction* func) {
-  auto in_ty = TypeTraits<InType>::type_singleton();
   auto out_ty = TypeTraits<OutType>::type_singleton();
 
   DCHECK_OK(func->AddKernel(
-      InType::type_id, {in_ty}, out_ty,
+      InType::type_id, {InputType(InType::type_id)}, out_ty,
       TrivialScalarUnaryAsArraysExec(BinaryToBinaryCastExec<OutType, InType>),
       NullHandling::COMPUTED_NO_PREALLOCATE));
 }
@@ -209,6 +327,7 @@ void AddBinaryToBinaryCast(CastFunction* func) {
   AddBinaryToBinaryCast<OutType, BinaryType>(func);
   AddBinaryToBinaryCast<OutType, LargeStringType>(func);
   AddBinaryToBinaryCast<OutType, LargeBinaryType>(func);
+  AddBinaryToBinaryCast<OutType, FixedSizeBinaryType>(func);
 }
 
 }  // namespace
@@ -226,18 +345,26 @@ std::vector<std::shared_ptr<CastFunction>> GetBinaryLikeCasts() {
   auto cast_string = std::make_shared<CastFunction>("cast_string", Type::STRING);
   AddCommonCasts(Type::STRING, utf8(), cast_string.get());
   AddNumberToStringCasts<StringType>(cast_string.get());
+  AddTemporalToStringCasts<StringType>(cast_string.get());
   AddBinaryToBinaryCast<StringType>(cast_string.get());
 
   auto cast_large_string =
       std::make_shared<CastFunction>("cast_large_string", Type::LARGE_STRING);
   AddCommonCasts(Type::LARGE_STRING, large_utf8(), cast_large_string.get());
   AddNumberToStringCasts<LargeStringType>(cast_large_string.get());
+  AddTemporalToStringCasts<LargeStringType>(cast_large_string.get());
   AddBinaryToBinaryCast<LargeStringType>(cast_large_string.get());
 
   auto cast_fsb =
       std::make_shared<CastFunction>("cast_fixed_size_binary", Type::FIXED_SIZE_BINARY);
   AddCommonCasts(Type::FIXED_SIZE_BINARY, OutputType(ResolveOutputFromOptions),
                  cast_fsb.get());
+  DCHECK_OK(cast_fsb->AddKernel(
+      Type::FIXED_SIZE_BINARY, {InputType(Type::FIXED_SIZE_BINARY)},
+      OutputType(FirstType),
+      TrivialScalarUnaryAsArraysExec(
+          BinaryToBinaryCastExec<FixedSizeBinaryType, FixedSizeBinaryType>),
+      NullHandling::COMPUTED_NO_PREALLOCATE));
 
   return {cast_binary, cast_large_binary, cast_string, cast_large_string, cast_fsb};
 }

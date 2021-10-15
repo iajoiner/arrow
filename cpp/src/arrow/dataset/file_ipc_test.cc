@@ -37,9 +37,10 @@
 #include "arrow/util/key_value_metadata.h"
 
 namespace arrow {
-namespace dataset {
 
 using internal::checked_pointer_cast;
+
+namespace dataset {
 
 class IpcFormatHelper {
  public:
@@ -85,7 +86,7 @@ TEST_F(TestIpcFileFormat, WriteRecordBatchReaderCustomOptions) {
 }
 
 TEST_F(TestIpcFileFormat, InspectFailureWithRelevantError) {
-  TestInspectFailureWithRelevantError(StatusCode::Invalid);
+  TestInspectFailureWithRelevantError(StatusCode::Invalid, "IPC");
 }
 TEST_F(TestIpcFileFormat, Inspect) { TestInspect(); }
 TEST_F(TestIpcFileFormat, IsSupported) { TestIsSupported(); }
@@ -99,13 +100,6 @@ class TestIpcFileSystemDataset : public testing::Test,
     auto ipc_format = std::make_shared<IpcFileFormat>();
     format_ = ipc_format;
     SetWriteOptions(ipc_format->DefaultWriteOptions());
-  }
-
-  std::shared_ptr<Scanner> MakeScanner(const std::shared_ptr<Dataset>& dataset,
-                                       const std::shared_ptr<ScanOptions>& scan_options) {
-    ScannerBuilder builder(dataset, scan_options);
-    EXPECT_OK_AND_ASSIGN(auto scanner, builder.Finish());
-    return scanner;
   }
 };
 
@@ -132,7 +126,9 @@ TEST_F(TestIpcFileSystemDataset, WriteExceedsMaxPartitions) {
   // require that no batch be grouped into more than 2 written batches:
   write_options_.max_partitions = 2;
 
-  auto scanner = MakeScanner(dataset_, scan_options_);
+  auto scanner_builder = ScannerBuilder(dataset_, scan_options_);
+  ASSERT_OK(scanner_builder.UseAsync(true));
+  EXPECT_OK_AND_ASSIGN(auto scanner, scanner_builder.Finish());
   EXPECT_RAISES_WITH_MESSAGE_THAT(Invalid, testing::HasSubstr("This exceeds the maximum"),
                                   FileSystemDataset::Write(write_options_, scanner));
 }
@@ -140,6 +136,7 @@ TEST_F(TestIpcFileSystemDataset, WriteExceedsMaxPartitions) {
 class TestIpcFileFormatScan : public FileFormatScanMixin<IpcFormatHelper> {};
 
 TEST_P(TestIpcFileFormatScan, ScanRecordBatchReader) { TestScan(); }
+TEST_P(TestIpcFileFormatScan, ScanBatchSize) { TestScanBatchSize(); }
 TEST_P(TestIpcFileFormatScan, ScanRecordBatchReaderWithVirtualColumn) {
   TestScanWithVirtualColumn();
 }

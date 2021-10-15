@@ -18,6 +18,7 @@
  */
 
 #include <arrow-glib/error.hpp>
+#include <arrow-glib/reader.hpp>
 #include <arrow-glib/table.hpp>
 
 #include <arrow-dataset-glib/dataset.hpp>
@@ -202,7 +203,7 @@ gadataset_scanner_builder_class_init(GADatasetScannerBuilderClass *klass)
 
 /**
  * gadataset_scanner_builder_new:
- * @dataset: A #GADatasetDatast to be scanned.
+ * @dataset: A #GADatasetDataset to be scanned.
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Returns: (nullable): A newly created #GADatasetScannerBuilder on success,
@@ -223,6 +224,43 @@ gadataset_scanner_builder_new(GADatasetDataset *dataset, GError **error)
   } else {
     return NULL;
   }
+}
+
+/**
+ * gadataset_scanner_builder_new_record_batch_reader:
+ * @reader: A #GArrowRecordBatchReader that produces record batches.
+ *
+ * Returns: (nullable): A newly created #GADatasetScannerBuilder.
+ *
+ * Since: 6.0.0
+ */
+GADatasetScannerBuilder *
+gadataset_scanner_builder_new_record_batch_reader(
+  GArrowRecordBatchReader *reader)
+{
+  auto arrow_reader = garrow_record_batch_reader_get_raw(reader);
+  auto arrow_scanner_builder =
+    arrow::dataset::ScannerBuilder::FromRecordBatchReader(arrow_reader);
+  return gadataset_scanner_builder_new_raw(&arrow_scanner_builder);
+}
+
+/**
+ * gadataset_scanner_builder_use_async:
+ * @builder: A #GADatasetScannerBuilder.
+ * @use_async: Use the asynchronous scanner
+ * @error: (nullable): Return location for a #GError or %NULL.
+ *
+ * Returns: void
+ *
+ * Since: 6.0.0
+ */
+void
+gadataset_scanner_builder_use_async(GADatasetScannerBuilder *builder, gboolean use_async,
+                                 GError **error)
+{
+  auto arrow_builder = gadataset_scanner_builder_get_raw(builder);
+  auto use_async_result = arrow_builder->UseAsync(use_async);
+  garrow::check(error, use_async_result, "[scanner-builder][use_async]");
 }
 
 /**

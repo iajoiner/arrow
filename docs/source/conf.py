@@ -34,6 +34,7 @@
 import datetime
 import os
 import sys
+import warnings
 from unittest import mock
 
 import pyarrow
@@ -44,6 +45,10 @@ sys.path.extend([
                  '..', '../..')
 
 ])
+
+# Suppresses all warnings printed when sphinx is traversing the code (e.g.
+# deprecation warnings)
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*pyarrow.*")
 
 # -- General configuration ------------------------------------------------
 
@@ -245,6 +250,10 @@ html_sidebars = {
 #    '**': ['sidebar-logo.html', 'sidebar-search-bs.html', 'sidebar-nav-bs.html'],
     '**': ['docs-sidebar.html'],
 }
+
+# The base URL which points to the root of the HTML documentation,
+# used for canonical url
+html_baseurl = "https://arrow.apache.org/docs/"
 
 # Additional templates that should be rendered to pages, maps page names to
 # template names.

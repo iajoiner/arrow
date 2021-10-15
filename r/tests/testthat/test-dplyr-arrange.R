@@ -17,7 +17,7 @@
 
 skip_if_not_available("dataset")
 
-library(dplyr)
+library(dplyr, warn.conflicts = FALSE)
 
 # randomize order of rows in test data
 tbl <- slice_sample(example_data_for_sorting, prop = 1L)
@@ -56,7 +56,7 @@ test_that("arrange() on integer, double, and character columns", {
   )
   expect_dplyr_equal(
     input %>%
-      mutate(zzz = int + dbl,) %>%
+      mutate(zzz = int + dbl, ) %>%
       arrange(zzz, chr) %>%
       collect(),
     tbl
@@ -139,19 +139,6 @@ test_that("arrange() on integer, double, and character columns", {
       collect(),
     tbl
   )
-  expect_warning(
-    expect_equal(
-      tbl %>%
-        Table$create() %>%
-        arrange(abs(int), dbl) %>%
-        collect(),
-      tbl %>%
-        arrange(abs(int), dbl) %>%
-        collect()
-    ),
-    "not supported in Arrow",
-    fixed = TRUE
-  )
 })
 
 test_that("arrange() on datetime columns", {
@@ -161,7 +148,6 @@ test_that("arrange() on datetime columns", {
       collect(),
     tbl
   )
-  skip("Sorting by only a single timestamp column fails (ARROW-12087)")
   expect_dplyr_equal(
     input %>%
       arrange(dttm) %>%
@@ -172,7 +158,6 @@ test_that("arrange() on datetime columns", {
 })
 
 test_that("arrange() on logical columns", {
-  skip("Sorting by bool columns is not supported (ARROW-12016)")
   expect_dplyr_equal(
     input %>%
       arrange(lgl, int) %>%
@@ -208,6 +193,13 @@ test_that("arrange() with bad inputs", {
       Table$create() %>%
       arrange(desc(aertidjfgjksertyj + iaermxiwerksxsdqq)),
     "not found",
+    fixed = TRUE
+  )
+  expect_error(
+    tbl %>%
+      Table$create() %>%
+      arrange(desc(int, chr)),
+    "expects only one argument",
     fixed = TRUE
   )
 })

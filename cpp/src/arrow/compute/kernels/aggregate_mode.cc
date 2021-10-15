@@ -130,6 +130,13 @@ struct CountModer {
   Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     // count values in all chunks, ignore nulls
     const Datum& datum = batch[0];
+
+    const ModeOptions& options = ModeState::Get(ctx);
+    if ((!options.skip_nulls && datum.null_count() > 0) ||
+        (datum.length() - datum.null_count() < options.min_count)) {
+      return PrepareOutput<T>(/*n=*/0, ctx, out).status();
+    }
+
     CountValues<CType>(this->counts.data(), datum, this->min);
 
     // generator to emit next value:count pair
@@ -154,9 +161,16 @@ struct CountModer {
 template <>
 struct CountModer<BooleanType> {
   Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+    const Datum& datum = batch[0];
+
+    const ModeOptions& options = ModeState::Get(ctx);
+    if ((!options.skip_nulls && datum.null_count() > 0) ||
+        (datum.length() - datum.null_count() < options.min_count)) {
+      return PrepareOutput<BooleanType>(/*n=*/0, ctx, out).status();
+    }
+
     int64_t counts[2]{};
 
-    const Datum& datum = batch[0];
     for (const auto& array : datum.chunks()) {
       if (array->length() > array->null_count()) {
         const int64_t true_count =
@@ -167,7 +181,6 @@ struct CountModer<BooleanType> {
       }
     }
 
-    const ModeOptions& options = ModeState::Get(ctx);
     const int64_t distinct_values = (counts[0] != 0) + (counts[1] != 0);
     const int64_t n = std::min(options.n, distinct_values);
 
@@ -198,12 +211,19 @@ struct SortModer {
   using Allocator = arrow::stl::allocator<CType>;
 
   Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+    const Datum& datum = batch[0];
+    const int64_t in_length = datum.length() - datum.null_count();
+
+    const ModeOptions& options = ModeState::Get(ctx);
+    if ((!options.skip_nulls && datum.null_count() > 0) ||
+        (in_length < options.min_count)) {
+      return PrepareOutput<T>(/*n=*/0, ctx, out).status();
+    }
+
     // copy all chunks to a buffer, ignore nulls and nans
     std::vector<CType, Allocator> in_buffer(Allocator(ctx->memory_pool()));
 
     uint64_t nan_count = 0;
-    const Datum& datum = batch[0];
-    const int64_t in_length = datum.length() - datum.null_count();
     if (in_length > 0) {
       in_buffer.resize(in_length);
       CopyNonNullValues(datum, in_buffer.data());
@@ -302,6 +322,31 @@ struct Moder<InType, enable_if_t<is_floating_type<InType>::value>> {
   SortModer<InType> impl;
 };
 
+template <typename T>
+Status ScalarMode(KernelContext* ctx, const Scalar& scalar, Datum* out) {
+  using CType = typename T::c_type;
+
+  const ModeOptions& options = ModeState::Get(ctx);
+  if ((!options.skip_nulls && !scalar.is_valid) ||
+      (static_cast<uint32_t>(scalar.is_valid) < options.min_count)) {
+    return PrepareOutput<T>(/*n=*/0, ctx, out).status();
+  }
+
+  if (scalar.is_valid) {
+    bool called = false;
+    return Finalize<T>(ctx, out, [&]() {
+      if (!called) {
+        called = true;
+        return std::pair<CType, uint64_t>(UnboxScalar<T>::Unbox(scalar), 1);
+      }
+      return std::pair<CType, uint64_t>(static_cast<CType>(0), kCountEOF);
+    });
+  }
+  return Finalize<T>(ctx, out, []() {
+    return std::pair<CType, uint64_t>(static_cast<CType>(0), kCountEOF);
+  });
+}
+
 template <typename _, typename InType>
 struct ModeExecutor {
   static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
@@ -311,6 +356,10 @@ struct ModeExecutor {
     const ModeOptions& options = ModeState::Get(ctx);
     if (options.n <= 0) {
       return Status::Invalid("ModeOption::n must be strictly positive");
+    }
+
+    if (batch[0].is_scalar()) {
+      return ScalarMode<InType>(ctx, *batch[0].scalar(), out);
     }
 
     return Moder<InType>().impl.Exec(ctx, batch, out);
@@ -325,7 +374,7 @@ VectorKernel NewModeKernel(const std::shared_ptr<DataType>& in_type) {
   auto out_type =
       struct_({field(kModeFieldName, in_type), field(kCountFieldName, int64())});
   kernel.signature =
-      KernelSignature::Make({InputType::Array(in_type)}, ValueDescr::Array(out_type));
+      KernelSignature::Make({InputType(in_type)}, ValueDescr::Array(out_type));
   return kernel;
 }
 

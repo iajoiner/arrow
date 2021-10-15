@@ -79,12 +79,18 @@ struct SortQuantiler {
 
   Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
     const QuantileOptions& options = QuantileState::Get(ctx);
+    const Datum& datum = batch[0];
 
     // copy all chunks to a buffer, ignore nulls and nans
     std::vector<CType, Allocator> in_buffer(Allocator(ctx->memory_pool()));
+    int64_t in_length = 0;
+    if ((!options.skip_nulls && datum.null_count() > 0) ||
+        (datum.length() - datum.null_count() < options.min_count)) {
+      in_length = 0;
+    } else {
+      in_length = datum.length() - datum.null_count();
+    }
 
-    const Datum& datum = batch[0];
-    const int64_t in_length = datum.length() - datum.null_count();
     if (in_length > 0) {
       in_buffer.resize(in_length);
       CopyNonNullValues(datum, in_buffer.data());
@@ -98,14 +104,14 @@ struct SortQuantiler {
     }
 
     // prepare out array
-    int64_t out_length = options.q.size();
-    if (in_buffer.empty()) {
-      out_length = 0;  // input is empty or only contains null and nan, return empty array
-    }
     // out type depends on options
     const bool is_datapoint = IsDataPoint(options);
     const std::shared_ptr<DataType> out_type =
         is_datapoint ? TypeTraits<InType>::type_singleton() : float64();
+    int64_t out_length = options.q.size();
+    if (in_buffer.empty()) {
+      return MakeArrayOfNull(out_type, out_length, ctx->memory_pool()).Value(out);
+    }
     auto out_data = ArrayData::Make(out_type, out_length, 0);
     out_data->buffers.resize(2, nullptr);
 
@@ -232,17 +238,21 @@ struct CountQuantiler {
 
     // count values in all chunks, ignore nulls
     const Datum& datum = batch[0];
-    int64_t in_length = CountValues<CType>(this->counts.data(), datum, this->min);
+    int64_t in_length = 0;
+    if ((options.skip_nulls || (!options.skip_nulls && datum.null_count() == 0)) &&
+        (datum.length() - datum.null_count() >= options.min_count)) {
+      in_length = CountValues<CType>(this->counts.data(), datum, this->min);
+    }
 
     // prepare out array
-    int64_t out_length = options.q.size();
-    if (in_length == 0) {
-      out_length = 0;  // input is empty or only contains null, return empty array
-    }
     // out type depends on options
     const bool is_datapoint = IsDataPoint(options);
     const std::shared_ptr<DataType> out_type =
         is_datapoint ? TypeTraits<InType>::type_singleton() : float64();
+    int64_t out_length = options.q.size();
+    if (in_length == 0) {
+      return MakeArrayOfNull(out_type, out_length, ctx->memory_pool()).Value(out);
+    }
     auto out_data = ArrayData::Make(out_type, out_length, 0);
     out_data->buffers.resize(2, nullptr);
 
@@ -389,6 +399,46 @@ struct ExactQuantiler<InType, enable_if_t<is_floating_type<InType>::value>> {
   SortQuantiler<InType> impl;
 };
 
+template <typename T>
+Status ScalarQuantile(KernelContext* ctx, const QuantileOptions& options,
+                      const Scalar& scalar, Datum* out) {
+  using CType = typename T::c_type;
+  ArrayData* output = out->mutable_array();
+  output->length = options.q.size();
+  auto out_type = IsDataPoint(options) ? scalar.type : float64();
+  ARROW_ASSIGN_OR_RAISE(
+      output->buffers[1],
+      ctx->Allocate(output->length * BitUtil::BytesForBits(GetBitWidth(*out_type))));
+
+  if (!scalar.is_valid || options.min_count > 1) {
+    output->null_count = output->length;
+    ARROW_ASSIGN_OR_RAISE(output->buffers[0], ctx->AllocateBitmap(output->length));
+    BitUtil::SetBitsTo(output->buffers[0]->mutable_data(), /*offset=*/0, output->length,
+                       false);
+    if (IsDataPoint(options)) {
+      CType* out_buffer = output->template GetMutableValues<CType>(1);
+      std::fill(out_buffer, out_buffer + output->length, CType(0));
+    } else {
+      double* out_buffer = output->template GetMutableValues<double>(1);
+      std::fill(out_buffer, out_buffer + output->length, 0.0);
+    }
+    return Status::OK();
+  }
+  output->null_count = 0;
+  if (IsDataPoint(options)) {
+    CType* out_buffer = output->template GetMutableValues<CType>(1);
+    for (int64_t i = 0; i < output->length; i++) {
+      out_buffer[i] = UnboxScalar<T>::Unbox(scalar);
+    }
+  } else {
+    double* out_buffer = output->template GetMutableValues<double>(1);
+    for (int64_t i = 0; i < output->length; i++) {
+      out_buffer[i] = static_cast<double>(UnboxScalar<T>::Unbox(scalar));
+    }
+  }
+  return Status::OK();
+}
+
 template <typename _, typename InType>
 struct QuantileExecutor {
   static Status Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
@@ -404,6 +454,10 @@ struct QuantileExecutor {
       if (q < 0 || q > 1) {
         return Status::Invalid("Quantile must be between 0 and 1");
       }
+    }
+
+    if (batch[0].is_scalar()) {
+      return ScalarQuantile<InType>(ctx, options, *batch[0].scalar(), out);
     }
 
     return ExactQuantiler<InType>().impl.Exec(ctx, batch, out);
@@ -427,8 +481,7 @@ void AddQuantileKernels(VectorFunction* func) {
   base.output_chunked = false;
 
   for (const auto& ty : NumericTypes()) {
-    base.signature =
-        KernelSignature::Make({InputType::Array(ty)}, OutputType(ResolveOutput));
+    base.signature = KernelSignature::Make({InputType(ty)}, OutputType(ResolveOutput));
     // output type is determined at runtime, set template argument to nulltype
     base.exec = GenerateNumeric<QuantileExecutor, NullType>(*ty);
     DCHECK_OK(func->AddKernel(base));
@@ -441,7 +494,7 @@ const FunctionDoc quantile_doc{
      "If quantile lies between two data points, an interpolated value is\n"
      "returned based on selected interpolation method.\n"
      "Nulls and NaNs are ignored.\n"
-     "An empty array is returned if there is no valid data point."),
+     "An array of nulls is returned if there is no valid data point."),
     {"array"},
     "QuantileOptions"};
 

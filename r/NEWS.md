@@ -17,14 +17,76 @@
   under the License.
 -->
 
-# arrow 4.0.1.9000
+# arrow 5.0.0.9000
 
-* `write_csv_arrow()` to write Arrow data to CSV
-* Bindings and support for more Arrow C++ Compute functions: `strsplit()` and `str_split()`, `na.omit()` et al., `any()`/`all()`,
-* `arrow_info()` now includes details on the C++ build, such as compiler version
-* `dplyr` queries on `Table` and `RecordBatch` now use the same expression internals as `Dataset` (via `InMemoryDataset`). Among other (mostly internal) benefits that come with this, the print method for `arrow_dplyr_query` now includes the expression and the resulting type of columns derived by `mutate()`.
+There are now two ways to query Arrow data:
+
+## 1. Grouped aggregation in Arrow
+
+`dplyr::summarize()`, both grouped and ungrouped, is now implemented for Arrow Datasets, Tables, and RecordBatches. Because data is scanned in chunks, you can aggregate over larger-than-memory datasets backed by many files. Supported aggregation functions include `n()`, `n_distinct()`, `min(),` `max()`, `sum()`, `mean()`, `var()`, `sd()`, `any()`, and `all()`. `median()` and `quantile()` with one probability are also supported and currently return approximate results using the t-digest algorithm.
+
+This enhancement does change the behavior of `summarize()` and `collect()` in some cases: see "Breaking changes" below for details.
+
+New compute functions include `str_to_title()` and `strftime()`.
+
+## 2. duckdb integration
+
+If you have the [duckdb](https://duckdb.org/) package installed, you can hand off an Arrow Dataset or query object to duckdb for further querying using the `to_duckdb()` function. This allows you to use duckdb's `dbplyr` methods, as well as its SQL interface, to aggregate data. Filtering and column projection done before `to_duckdb()` is evaluated in Arrow.
+## Breaking changes
+
+* Row order of data from a Dataset query is no longer deterministic. If you need a stable sort order, you should explicitly `arrange()` the query result. For calls to `summarize()`, you can set `options(arrow.summarise.sort = TRUE)` to match the current `dplyr` behavior of sorting on the grouping columns.
+* `dplyr::summarize()` on an in-memory Arrow Table or RecordBatch no longer eagerly evaluates. Call `compute()` or `collect()` to evaluate the query.
+* `head()` and `tail()` also no longer eagerly evaluate, both for in-memory data and for Datasets. Also, because row order is no longer deterministic, they will effectively give you a random slice of data from somewhere in the dataset unless you `arrange()` to specify sorting.
+* Datasets are officially no longer supported on 32-bit Windows on R < 4.0 (Rtools 3.5). 32-bit Windows users should upgrade to a newer version of R in order to use datasets.
+
+## Installation on Linux
+
+* Package installation now fails if the Arrow C++ library does not compile. In previous versions, if the C++ library failed to compile, you would get a successful R package installation that wouldn't do much useful.
+* You can disable all optional C++ components when building from source by setting the environment variable `LIBARROW_MINIMAL=true`. This will have the core Arrow/Feather components but excludes Parquet, Datasets, compression libraries, and other optional features.
+* Source packages now bundle the Arrow C++ source code, so it does not have to be downloaded in order to build the package. Because the source is included, it is now possible to build the package on an offline/airgapped system. By default, the offline build will be minimal because it cannot download third-party C++ dependencies required to support all features. To allow a fully featured offline build, the included `create_package_with_all_dependencies()` function (also available on GitHub without installing the arrow package) will download all third-party C++ dependencies and bundle them inside the R source package. Run this function on a system connected to the network to produce the "fat" source package, then copy that .tar.gz package to your offline machine and install.
+* Source builds can make use of system dependencies (such as `libz`) by setting `ARROW_DEPENDENCY_SOURCE=AUTO`. This is not the default in this release (`BUNDLED`, i.e. download and build all dependencies) but may become the default in the future.
+* The JSON library components (`read_json_arrow()`) are now optional and still on by default; set `ARROW_JSON=OFF` before building to disable them.
+
+# arrow 5.0.0.2
+
+This patch version contains fixes for some sanitizer and compiler warnings.
+
+# arrow 5.0.0
+
+## More dplyr
+
+* There are now more than 250 compute functions available for use in `dplyr::filter()`, `mutate()`, etc. Additions in this release include:
+
+  * String operations: `strsplit()` and `str_split()`; `strptime()`; `paste()`, `paste0()`, and `str_c()`; `substr()` and `str_sub()`; `str_like()`; `str_pad()`; `stri_reverse()`
+  * Date/time operations: `lubridate` methods such as `year()`, `month()`, `wday()`, and so on
+  * Math: logarithms (`log()` et al.); trigonometry (`sin()`, `cos()`, et al.); `abs()`; `sign()`; `pmin()` and `pmax()`; `ceiling()`, `floor()`, and `trunc()`
+  * Conditional functions, with some limitations on input type in this release: `ifelse()` and `if_else()` for all but `Decimal` types; `case_when()` for logical, numeric, and temporal types only; `coalesce()` for all but lists/structs. Note also that in this release, factors/dictionaries are converted to strings in these functions.
+  * `is.*` functions are supported and can be used inside `relocate()`
+
+* The print method for `arrow_dplyr_query` now includes the expression and the resulting type of columns derived by `mutate()`.
+* `transmute()` now errors if passed arguments `.keep`, `.before`, or `.after`, for consistency with the behavior of `dplyr` on `data.frame`s.
+
+## CSV writing
+
+* `write_csv_arrow()` to use Arrow to write a data.frame to a single CSV file
+* `write_dataset(format = "csv", ...)` to write a Dataset to CSVs, including with partitioning
+
+## C interface
+
 * Added bindings for the remainder of C data interface: Type, Field, and RecordBatchReader (from the experimental C stream interface). These also have `reticulate::py_to_r()` and `r_to_py()` methods. Along with the addition of the `Scanner$ToRecordBatchReader()` method, you can now build up a Dataset query in R and pass the resulting stream of batches to another tool in process.
-* `match_arrow` now converts `x` into an `Array` if it is not a `Scalar`, `Array` or `ChunkedArray` and no longer dispatches `base::match()`.
+* C interface methods are exposed on Arrow objects (e.g. `Array$export_to_c()`, `RecordBatch$import_from_c()`), similar to how they are in `pyarrow`. This facilitates their use in other packages. See the `py_to_r()` and `r_to_py()` methods for usage examples.
+
+## Other enhancements
+
+* Converting an R `data.frame` to an Arrow `Table` uses multithreading across columns
+* Some Arrow array types now use ALTREP when converting to R. To disable this, set `options(arrow.use_altrep = FALSE)`
+* `is.na()` now evaluates to `TRUE` on `NaN` values in floating point number fields, for consistency with base R.
+* `is.nan()` now evaluates to `FALSE` on `NA` values in floating point number fields and `FALSE` on all values in non-floating point fields, for consistency with base R.
+* Additional methods for `Array`, `ChunkedArray`, `RecordBatch`, and `Table`: `na.omit()` and friends, `any()`/`all()`
+* Scalar inputs to `RecordBatch$create()` and `Table$create()` are recycled
+* `arrow_info()` includes details on the C++ build, such as compiler version
+* `match_arrow()` now converts `x` into an `Array` if it is not a `Scalar`, `Array` or `ChunkedArray` and no longer dispatches `base::match()`.
+* Row-level metadata is now restricted to reading/writing single parquet or feather files. Row-level metadata with datasets is ignored (with a warning) if the dataset contains row-level metadata. Writing a dataset with row-level metadata will also be ignored (with a warning). We are working on a more robust implementation to support row-level metadata (and other complex types) --- stay tuned. For working with {sf} objects, [{sfarrow}](https://CRAN.R-project.org/package=sfarrow) is helpful for serializing sf columns and sharing them with geopandas.
 
 # arrow 4.0.1
 

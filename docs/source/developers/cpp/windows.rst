@@ -33,13 +33,7 @@ Microsoft provides the free Visual Studio Community edition. When doing
 development in the shell, you must initialize the development environment
 each time you open the shell.
 
-For Visual Studio 2015, execute the following batch script:
-
-.. code-block:: shell
-
-   "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat" amd64
-
-For Visual Studio 2017, the script is:
+For Visual Studio 2017, execute the following batch script:
 
 .. code-block:: shell
 
@@ -81,7 +75,7 @@ Arrow codebase):
 
 .. code-block:: shell
 
-   conda create -y -n arrow-dev --file=ci\conda_env_cpp.yml
+   conda create -y -n arrow-dev --file=ci\conda_env_cpp.txt
 
 Then "activate" this conda environment with:
 
@@ -138,7 +132,7 @@ of Arrow and run the command:
      --clean-after-build
 
 On Windows, vcpkg builds dynamic link libraries by default. Use the triplet
-``x64-windows-static`` to build static libraries. vcpkg downloads source 
+``x64-windows-static`` to build static libraries. vcpkg downloads source
 packages and compiles them locally, so installing dependencies with vcpkg is
 more time-consuming than with conda.
 
@@ -150,12 +144,12 @@ Then in your ``cmake`` command, to use dependencies installed by vcpkg, set:
 
 You can optionally set other variables to override the default CMake
 configurations for vcpkg, including:
-   
+
 * ``-DCMAKE_TOOLCHAIN_FILE``: by default, the CMake scripts automatically find
   the location of the vcpkg CMake toolchain file ``vcpkg.cmake``; use this to
   instead specify its location
 * ``-DVCPKG_TARGET_TRIPLET``: by default, the CMake scripts attempt to infer the
-  vcpkg 
+  vcpkg
   `triplet <https://github.com/microsoft/vcpkg/blob/master/docs/users/triplets.md>`_;
   use this to instead specify the triplet
 * ``-DARROW_DEPENDENCY_USE_SHARED``: default is ``ON``; set to ``OFF`` for
@@ -176,12 +170,13 @@ an out of source build by generating a MSVC solution:
    cd cpp
    mkdir build
    cd build
-   cmake .. -G "Visual Studio 14 2015" -A x64 ^
+   cmake .. -G "Visual Studio 15 2017" -A x64 ^
          -DARROW_BUILD_TESTS=ON
    cmake --build . --config Release
 
 For newer versions of Visual Studio, specify the generator
-``Visual Studio 15 2017`` or ``Visual Studio 16 2019``.
+``Visual Studio 16 2019`` or see ``cmake --help`` for available
+generators.
 
 Building with Ninja and clcache
 ===============================
@@ -310,7 +305,7 @@ The command line to build Arrow in Debug mode will look something like this:
    cd cpp
    mkdir build
    cd build
-   cmake .. -G "Visual Studio 14 2015" -A x64 ^
+   cmake .. -G "Visual Studio 15 2017" -A x64 ^
          -DARROW_BOOST_USE_SHARED=OFF ^
          -DCMAKE_BUILD_TYPE=Debug ^
          -DBOOST_ROOT=C:/local/boost_1_63_0  ^
@@ -408,7 +403,7 @@ tests can be made with there individual make targets).
 
 .. code-block:: shell
 
-   conda install -c conda-forge --file .\ci\conda_env_cpp.yml
+   conda install -c conda-forge --file .\ci\conda_env_cpp.txt
    .\ci\appveyor-cpp-setup.bat
    @rem this might fail but at this point most unit tests should be buildable by there individual targets
    @rem see next line for example.

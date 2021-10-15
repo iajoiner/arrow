@@ -39,15 +39,18 @@ DataType <- R6Class("DataType",
     },
     fields = function() {
       DataType__fields(self)
-    }
+    },
+    export_to_c = function(ptr) ExportType(self, ptr)
   ),
-
   active = list(
     id = function() DataType__id(self),
     name = function() DataType__name(self),
     num_fields = function() DataType__num_fields(self)
   )
 )
+
+#' @include arrowExports.R
+DataType$import_from_c <- ImportType
 
 INTEGER_TYPES <- as.character(outer(c("uint", "int"), c(8, 16, 32, 64), paste0))
 FLOAT_TYPES <- c("float16", "float32", "float64", "halffloat", "float", "double")
@@ -135,7 +138,7 @@ Null <- R6Class("Null", inherit = DataType)
 Timestamp <- R6Class("Timestamp",
   inherit = FixedWidthType,
   public = list(
-    timezone = function()  TimestampType__timezone(self),
+    timezone = function() TimestampType__timezone(self),
     unit = function() TimestampType__unit(self)
   )
 )

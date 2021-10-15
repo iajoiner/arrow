@@ -34,8 +34,7 @@ We follow a similar PEP8-like coding style to the `pandas project
 
 .. code-block:: shell
 
-   pip install -e arrow/dev/archery
-   pip install -r arrow/dev/archery/requirements-lint.txt
+   pip install -e arrow/dev/archery[lint]
 
 .. code-block:: shell
 
@@ -174,10 +173,10 @@ On Linux and macOS:
 .. code-block:: shell
 
     conda create -y -n pyarrow-dev -c conda-forge \
-        --file arrow/ci/conda_env_unix.yml \
-        --file arrow/ci/conda_env_cpp.yml \
-        --file arrow/ci/conda_env_python.yml \
-        --file arrow/ci/conda_env_gandiva.yml \
+        --file arrow/ci/conda_env_unix.txt \
+        --file arrow/ci/conda_env_cpp.txt \
+        --file arrow/ci/conda_env_python.txt \
+        --file arrow/ci/conda_env_gandiva.txt \
         compilers \
         python=3.7 \
         pandas
@@ -412,8 +411,6 @@ Building on Windows
 Building on Windows requires one of the following compilers to be installed:
 
 - `Build Tools for Visual Studio 2017 <https://download.visualstudio.microsoft.com/download/pr/3e542575-929e-4297-b6c6-bef34d0ee648/639c868e1219c651793aff537a1d3b77/vs_buildtools.exe>`_
-- `Microsoft Build Tools 2015 <http://download.microsoft.com/download/5/F/7/5F7ACAEB-8363-451F-9425-68A90F98B238/visualcppbuildtools_full.exe>`_
-- Visual Studio 2015
 - Visual Studio 2017
 
 During the setup of Build Tools ensure at least one Windows SDK is selected.
@@ -432,9 +429,9 @@ First, starting from fresh clones of Apache Arrow:
 .. code-block:: shell
 
    conda create -y -n pyarrow-dev -c conda-forge ^
-       --file arrow\ci\conda_env_cpp.yml ^
-       --file arrow\ci\conda_env_python.yml ^
-       --file arrow\ci\conda_env_gandiva.yml ^
+       --file arrow\ci\conda_env_cpp.txt ^
+       --file arrow\ci\conda_env_python.txt ^
+       --file arrow\ci\conda_env_gandiva.txt ^
        python=3.7
    conda activate pyarrow-dev
 
@@ -452,13 +449,6 @@ We set a number of environment variables:
    set ARROW_HOME=%cd%\arrow-dist
    set PATH=%ARROW_HOME%\bin;%PATH%
    set PYARROW_CMAKE_GENERATOR=Visual Studio 15 2017 Win64
-
-This assumes Visual Studio 2017 or its build tools are used. For Visual Studio
-2015 and its build tools use the following instead:
-
-.. code-block:: shell
-
-   set PYARROW_CMAKE_GENERATOR=Visual Studio 14 2015 Win64
 
 Let's configure, build and install the Arrow C++ libraries:
 

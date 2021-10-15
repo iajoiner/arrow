@@ -34,29 +34,33 @@ namespace internal {
 namespace {
 
 struct Equal {
-  template <typename T>
-  static constexpr bool Call(KernelContext*, const T& left, const T& right, Status*) {
+  template <typename T, typename Arg0, typename Arg1>
+  static constexpr T Call(KernelContext*, const Arg0& left, const Arg1& right, Status*) {
+    static_assert(std::is_same<T, bool>::value && std::is_same<Arg0, Arg1>::value, "");
     return left == right;
   }
 };
 
 struct NotEqual {
-  template <typename T>
-  static constexpr bool Call(KernelContext*, const T& left, const T& right, Status*) {
+  template <typename T, typename Arg0, typename Arg1>
+  static constexpr T Call(KernelContext*, const Arg0& left, const Arg1& right, Status*) {
+    static_assert(std::is_same<T, bool>::value && std::is_same<Arg0, Arg1>::value, "");
     return left != right;
   }
 };
 
 struct Greater {
-  template <typename T>
-  static constexpr bool Call(KernelContext*, const T& left, const T& right, Status*) {
+  template <typename T, typename Arg0, typename Arg1>
+  static constexpr T Call(KernelContext*, const Arg0& left, const Arg1& right, Status*) {
+    static_assert(std::is_same<T, bool>::value && std::is_same<Arg0, Arg1>::value, "");
     return left > right;
   }
 };
 
 struct GreaterEqual {
-  template <typename T>
-  static constexpr bool Call(KernelContext*, const T& left, const T& right, Status*) {
+  template <typename T, typename Arg0, typename Arg1>
+  static constexpr T Call(KernelContext*, const Arg0& left, const Arg1& right, Status*) {
+    static_assert(std::is_same<T, bool>::value && std::is_same<Arg0, Arg1>::value, "");
     return left >= right;
   }
 };
@@ -77,13 +81,15 @@ template <typename T>
 using enable_if_floating_point = enable_if_t<std::is_floating_point<T>::value, T>;
 
 struct Minimum {
-  template <typename T>
-  static enable_if_floating_point<T> Call(T left, T right) {
+  template <typename T, typename Arg0, typename Arg1>
+  static enable_if_floating_point<T> Call(Arg0 left, Arg1 right) {
+    static_assert(std::is_same<T, Arg0>::value && std::is_same<Arg0, Arg1>::value, "");
     return std::fmin(left, right);
   }
 
-  template <typename T>
-  static enable_if_integer<T> Call(T left, T right) {
+  template <typename T, typename Arg0, typename Arg1>
+  static enable_if_integer<T> Call(Arg0 left, Arg1 right) {
+    static_assert(std::is_same<T, Arg0>::value && std::is_same<Arg0, Arg1>::value, "");
     return std::min(left, right);
   }
 
@@ -104,13 +110,15 @@ struct Minimum {
 };
 
 struct Maximum {
-  template <typename T>
-  static enable_if_floating_point<T> Call(T left, T right) {
+  template <typename T, typename Arg0, typename Arg1>
+  static enable_if_floating_point<T> Call(Arg0 left, Arg1 right) {
+    static_assert(std::is_same<T, Arg0>::value && std::is_same<Arg0, Arg1>::value, "");
     return std::fmax(left, right);
   }
 
-  template <typename T>
-  static enable_if_integer<T> Call(T left, T right) {
+  template <typename T, typename Arg0, typename Arg1>
+  static enable_if_integer<T> Call(Arg0 left, Arg1 right) {
+    static_assert(std::is_same<T, Arg0>::value && std::is_same<Arg0, Arg1>::value, "");
     return std::max(left, right);
   }
 
@@ -151,6 +159,9 @@ struct CompareFunction : ScalarFunction {
 
   Result<const Kernel*> DispatchBest(std::vector<ValueDescr>* values) const override {
     RETURN_NOT_OK(CheckArity(*values));
+    if (HasDecimal(*values)) {
+      RETURN_NOT_OK(CastBinaryDecimalArgs(DecimalPromotion::kAdd, values));
+    }
 
     using arrow::compute::detail::DispatchExactImpl;
     if (auto kernel = DispatchExactImpl(this, *values)) return kernel;
@@ -160,9 +171,9 @@ struct CompareFunction : ScalarFunction {
 
     if (auto type = CommonNumeric(*values)) {
       ReplaceTypes(type, values);
-    } else if (auto type = CommonTimestamp(*values)) {
+    } else if (auto type = CommonTemporal(values->data(), values->size())) {
       ReplaceTypes(type, values);
-    } else if (auto type = CommonBinary(*values)) {
+    } else if (auto type = CommonBinary(values->data(), values->size())) {
       ReplaceTypes(type, values);
     }
 
@@ -184,7 +195,7 @@ struct VarArgsCompareFunction : ScalarFunction {
 
     if (auto type = CommonNumeric(*values)) {
       ReplaceTypes(type, values);
-    } else if (auto type = CommonTimestamp(*values)) {
+    } else if (auto type = CommonTemporal(values->data(), values->size())) {
       ReplaceTypes(type, values);
     }
 
@@ -212,7 +223,7 @@ std::shared_ptr<ScalarFunction> MakeCompareFunction(std::string name,
   AddGenericCompare<DoubleType, Op>(float64(), func.get());
 
   // Add timestamp kernels
-  for (auto unit : AllTimeUnits()) {
+  for (auto unit : TimeUnit::values()) {
     InputType in_type(match::TimestampTypeUnit(unit));
     auto exec =
         GeneratePhysicalInteger<applicator::ScalarBinaryEqualTypes, BooleanType, Op>(
@@ -221,7 +232,7 @@ std::shared_ptr<ScalarFunction> MakeCompareFunction(std::string name,
   }
 
   // Duration
-  for (auto unit : AllTimeUnits()) {
+  for (auto unit : TimeUnit::values()) {
     InputType in_type(match::DurationTypeUnit(unit));
     auto exec =
         GeneratePhysicalInteger<applicator::ScalarBinaryEqualTypes, BooleanType, Op>(
@@ -248,6 +259,19 @@ std::shared_ptr<ScalarFunction> MakeCompareFunction(std::string name,
   for (const std::shared_ptr<DataType>& ty : BaseBinaryTypes()) {
     auto exec =
         GenerateVarBinaryBase<applicator::ScalarBinaryEqualTypes, BooleanType, Op>(*ty);
+    DCHECK_OK(func->AddKernel({ty, ty}, boolean(), std::move(exec)));
+  }
+
+  for (const auto id : {Type::DECIMAL128, Type::DECIMAL256}) {
+    auto exec = GenerateDecimal<applicator::ScalarBinaryEqualTypes, BooleanType, Op>(id);
+    DCHECK_OK(
+        func->AddKernel({InputType(id), InputType(id)}, boolean(), std::move(exec)));
+  }
+
+  {
+    auto exec =
+        applicator::ScalarBinaryEqualTypes<BooleanType, FixedSizeBinaryType, Op>::Exec;
+    auto ty = InputType(Type::FIXED_SIZE_BINARY);
     DCHECK_OK(func->AddKernel({ty, ty}, boolean(), std::move(exec)));
   }
 
@@ -291,7 +315,8 @@ struct ScalarMinMax {
         value = UnboxScalar<OutType>::Unbox(scalar);
         valid = true;
       } else {
-        value = Op::Call(value, UnboxScalar<OutType>::Unbox(scalar));
+        value = Op::template Call<OutValue, OutValue, OutValue>(
+            value, UnboxScalar<OutType>::Unbox(scalar));
       }
     }
     out->is_valid = valid;
@@ -396,7 +421,7 @@ struct ScalarMinMax {
             auto u = out_it();
             if (!output->buffers[0] ||
                 BitUtil::GetBit(output->buffers[0]->data(), index)) {
-              writer.Write(Op::Call(u, value));
+              writer.Write(Op::template Call<OutValue, OutValue, OutValue>(u, value));
             } else {
               writer.Write(value);
             }

@@ -38,6 +38,7 @@ Factory functions
    partitioning
    field
    scalar
+   write_dataset
 
 Classes
 -------
@@ -47,6 +48,9 @@ Classes
 
    FileFormat
    ParquetFileFormat
+   ORCFileFormat
+   IpcFileFormat
+   CsvFileFormat
    Partitioning
    PartitioningFactory
    DirectoryPartitioning

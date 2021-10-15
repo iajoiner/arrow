@@ -66,6 +66,8 @@
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
 
+#include "arrow/util/windows_fixup.h"
+
 #include "arrow/buffer.h"
 #include "arrow/filesystem/filesystem.h"
 #include "arrow/filesystem/path_util.h"
@@ -85,7 +87,6 @@
 #include "arrow/util/optional.h"
 #include "arrow/util/task_group.h"
 #include "arrow/util/thread_pool.h"
-#include "arrow/util/windows_fixup.h"
 
 namespace arrow {
 
@@ -482,6 +483,43 @@ std::string FormatRange(int64_t start, int64_t length) {
   return ss.str();
 }
 
+// An AWS RetryStrategy that wraps a provided arrow::fs::S3RetryStrategy
+class WrappedRetryStrategy : public Aws::Client::RetryStrategy {
+ public:
+  explicit WrappedRetryStrategy(const std::shared_ptr<S3RetryStrategy>& s3_retry_strategy)
+      : s3_retry_strategy_(s3_retry_strategy) {}
+
+  bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
+                   long attempted_retries) const override {  // NOLINT runtime/int
+    S3RetryStrategy::AWSErrorDetail detail = ErrorToDetail(error);
+    return s3_retry_strategy_->ShouldRetry(detail,
+                                           static_cast<int64_t>(attempted_retries));
+  }
+
+  long CalculateDelayBeforeNextRetry(  // NOLINT runtime/int
+      const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
+      long attempted_retries) const override {  // NOLINT runtime/int
+    S3RetryStrategy::AWSErrorDetail detail = ErrorToDetail(error);
+    return static_cast<long>(  // NOLINT runtime/int
+        s3_retry_strategy_->CalculateDelayBeforeNextRetry(
+            detail, static_cast<int64_t>(attempted_retries)));
+  }
+
+ private:
+  template <typename ErrorType>
+  static S3RetryStrategy::AWSErrorDetail ErrorToDetail(
+      const Aws::Client::AWSError<ErrorType>& error) {
+    S3RetryStrategy::AWSErrorDetail detail;
+    detail.error_type = static_cast<int>(error.GetErrorType());
+    detail.message = std::string(FromAwsString(error.GetMessage()));
+    detail.exception_name = std::string(FromAwsString(error.GetExceptionName()));
+    detail.should_retry = error.ShouldRetry();
+    return detail;
+  }
+
+  std::shared_ptr<S3RetryStrategy> s3_retry_strategy_;
+};
+
 class S3Client : public Aws::S3::S3Client {
  public:
   using Aws::S3::S3Client::S3Client;
@@ -564,7 +602,12 @@ class ClientBuilder {
     } else {
       return Status::Invalid("Invalid S3 connection scheme '", options_.scheme, "'");
     }
-    client_config_.retryStrategy = std::make_shared<ConnectRetryStrategy>();
+    if (options_.retry_strategy) {
+      client_config_.retryStrategy =
+          std::make_shared<WrappedRetryStrategy>(options_.retry_strategy);
+    } else {
+      client_config_.retryStrategy = std::make_shared<ConnectRetryStrategy>();
+    }
     if (!internal::global_options.tls_ca_file_path.empty()) {
       client_config_.caFile = ToAwsString(internal::global_options.tls_ca_file_path);
     }
@@ -1487,13 +1530,35 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     }
   }
 
+  // Tests to see if a bucket exists
+  Result<bool> BucketExists(const std::string& bucket) {
+    S3Model::HeadBucketRequest req;
+    req.SetBucket(ToAwsString(bucket));
+
+    auto outcome = client_->HeadBucket(req);
+    if (!outcome.IsSuccess()) {
+      if (!IsNotFound(outcome.GetError())) {
+        return ErrorToStatus(std::forward_as_tuple(
+                                 "When testing for existence of bucket '", bucket, "': "),
+                             outcome.GetError());
+      }
+      return false;
+    }
+    return true;
+  }
+
   // Create a bucket.  Successful if bucket already exists.
   Status CreateBucket(const std::string& bucket) {
     S3Model::CreateBucketConfiguration config;
     S3Model::CreateBucketRequest req;
-    config.SetLocationConstraint(
-        S3Model::BucketLocationConstraintMapper::GetBucketLocationConstraintForName(
-            ToAwsString(options().region)));
+    auto _region = region();
+    // AWS S3 treats the us-east-1 differently than other regions
+    // https://docs.aws.amazon.com/cli/latest/reference/s3api/create-bucket.html
+    if (_region != "us-east-1") {
+      config.SetLocationConstraint(
+          S3Model::BucketLocationConstraintMapper::GetBucketLocationConstraintForName(
+              ToAwsString(_region)));
+    }
     req.SetBucket(ToAwsString(bucket));
     req.SetCreateBucketConfiguration(config);
 
@@ -2111,7 +2176,10 @@ Status S3FileSystem::CreateDir(const std::string& s, bool recursive) {
   // Create object
   if (recursive) {
     // Ensure bucket exists
-    RETURN_NOT_OK(impl_->CreateBucket(path.bucket));
+    ARROW_ASSIGN_OR_RAISE(bool bucket_exists, impl_->BucketExists(path.bucket));
+    if (!bucket_exists) {
+      RETURN_NOT_OK(impl_->CreateBucket(path.bucket));
+    }
     // Ensure that all parents exist, then the directory itself
     std::string parent_key;
     for (const auto& part : path.key_parts) {

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -34,13 +34,11 @@ TYPE="$2"
 
 local_prefix="/arrow/dev/tasks/linux-packages"
 
-artifactory_base_url="https://apache.jfrog.io/artifactory/arrow/centos"
-if [ "${TYPE}" = "rc" ]; then
-  artifactory_base_url+="-rc"
-fi
+artifactory_base_url="https://apache.jfrog.io/artifactory/arrow"
 
 distribution=$(. /etc/os-release && echo "${ID}")
-distribution_version=$(. /etc/os-release && echo "${VERSION_ID}")
+distribution_version=$(. /etc/os-release && echo "${VERSION_ID}" | grep -o "^[0-9]*")
+distribution_prefix="centos"
 
 cmake_package=cmake
 cmake_command=cmake
@@ -50,7 +48,11 @@ have_glib=yes
 have_parquet=yes
 have_python=yes
 install_command="dnf install -y --enablerepo=powertools"
+
 case "${distribution}-${distribution_version}" in
+  almalinux-*)
+    distribution_prefix="almalinux"
+    ;;
   amzn-2)
     cmake_package=cmake3
     cmake_command=cmake3
@@ -58,6 +60,8 @@ case "${distribution}-${distribution_version}" in
     have_gandiva=no
     have_python=no
     install_command="yum install -y"
+    distribution_prefix="amazon-linux"
+    amazon-linux-extras install epel -y
     ;;
   centos-7)
     cmake_package=cmake3
@@ -86,6 +90,10 @@ if [ "${TYPE}" = "local" ]; then
   esac
   release_path="${local_prefix}/yum/repositories"
   case "${distribution}" in
+    almalinux)
+      package_version+=".el${distribution_version}"
+      release_path+="/almalinux"
+      ;;
     amzn)
       package_version+=".${distribution}${distribution_version}"
       release_path+="/amazon-linux"
@@ -101,8 +109,11 @@ if [ "${TYPE}" = "local" ]; then
   ${install_command} "${release_path}"
 else
   package_version="${VERSION}"
+  if [ "${TYPE}" = "rc" ]; then
+    distribution_prefix+="-rc"
+  fi
   ${install_command} \
-    ${artifactory_base_url}/${distribution_version}/apache-arrow-release-latest.rpm
+    ${artifactory_base_url}/${distribution_prefix}/${distribution_version}/apache-arrow-release-latest.rpm
 fi
 
 if [ "${TYPE}" = "local" ]; then
@@ -118,7 +129,9 @@ else
   if [ "${TYPE}" = "rc" ]; then
     sed \
       -i"" \
+      -e "s,/almalinux/,/almalinux-rc/,g" \
       -e "s,/centos/,/centos-rc/,g" \
+      -e "s,/amazon-linux/,/amazon-linux-rc/,g" \
       /etc/yum.repos.d/Apache-Arrow.repo
   fi
 fi

@@ -18,12 +18,6 @@
 # Wrap testthat::test_that with a check for the C++ library
 options(..skip.tests = !arrow:::arrow_available())
 
-if (tolower(Sys.info()[["sysname"]]) == "windows") {
-  # For now, disable multithreading by default on Windows
-  # See https://issues.apache.org/jira/browse/ARROW-8379
-  options(arrow.use_threads = FALSE)
-}
-
 set.seed(1)
 
 MAX_INT <- 2147483647L
@@ -66,4 +60,10 @@ test_that <- function(what, code) {
 # available (so that at least some tests are run on those platforms)
 r_only <- function(code) {
   withr::with_options(list(..skip.tests = FALSE), code)
+}
+
+make_temp_dir <- function() {
+  path <- tempfile()
+  dir.create(path)
+  normalizePath(path, winslash = "/")
 }

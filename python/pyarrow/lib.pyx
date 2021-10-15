@@ -16,7 +16,6 @@
 # under the License.
 
 # cython: profile = False
-# cython: embedsignature = True
 # cython: nonecheck = True
 # distutils: language = c++
 
@@ -37,6 +36,9 @@ arrow_init_numpy()
 # Initialize PyArrow C++ API
 # (used from some of our C++ code, see e.g. ARROW-5260)
 import_pyarrow()
+
+
+MonthDayNano = NewMonthDayNanoTupleType()
 
 
 def cpu_count():
@@ -60,6 +62,11 @@ def cpu_count():
 def set_cpu_count(int count):
     """
     Set the number of threads to use in parallel operations.
+
+    Parameters
+    ----------
+    count : int
+        The number of concurrent threads that should be used.
 
     See Also
     --------
@@ -92,6 +99,7 @@ Type_TIMESTAMP = _Type_TIMESTAMP
 Type_TIME32 = _Type_TIME32
 Type_TIME64 = _Type_TIME64
 Type_DURATION = _Type_DURATION
+Type_INTERVAL_MONTH_DAY_NANO = _Type_INTERVAL_MONTH_DAY_NANO
 Type_BINARY = _Type_BINARY
 Type_STRING = _Type_STRING
 Type_LARGE_BINARY = _Type_LARGE_BINARY

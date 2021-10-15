@@ -15,14 +15,13 @@
 # specific language governing permissions and limitations
 # under the License.
 
-context("To/from Python")
-
 test_that("install_pyarrow", {
   skip_on_cran()
   skip_if_not_dev_mode()
-  # Python problems on Apple M1 still
-  skip_if(grepl("arm-apple|aarch64.*darwin", R.Version()$platform))
+  # Windows CI machine doesn't pick up the right python or something
+  skip_on_os("windows")
   skip_if_not_installed("reticulate")
+
   venv <- try(reticulate::virtualenv_create("arrow-test"))
   # Bail out if virtualenv isn't available
   skip_if(inherits(venv, "try-error"))
@@ -97,14 +96,13 @@ test_that("Table with metadata roundtrip", {
 })
 
 test_that("DataType roundtrip", {
-  r <- timestamp("ms", timezone = "Asia/Pyongyang")
+  r <- timestamp("ms", timezone = "Pacific/Marquesas")
   py <- reticulate::r_to_py(r)
   expect_s3_class(py, "pyarrow.lib.DataType")
   expect_equal(reticulate::py_to_r(py), r)
 })
 
 test_that("Field roundtrip", {
-  skip("TODO in pyarrow: 'pyarrow.lib.Field' has no attribute '_import_from_c'")
   r <- field("x", time32("s"))
   py <- reticulate::r_to_py(r)
   expect_s3_class(py, "pyarrow.lib.Field")
@@ -132,4 +130,15 @@ test_that("RecordBatchReader to python", {
       select(int, lgl) %>%
       filter(int > 6)
   )
+})
+
+test_that("RecordBatchReader from python", {
+  tab <- Table$create(example_data)
+  scan <- Scanner$create(tab)
+  reader <- scan$ToRecordBatchReader()
+  pyreader <- reticulate::r_to_py(reader)
+  back_to_r <- reticulate::py_to_r(pyreader)
+  rt_table <- back_to_r$read_table()
+  expect_r6_class(rt_table, "Table")
+  expect_identical(as.data.frame(rt_table), example_data)
 })

@@ -17,7 +17,6 @@
 
 # cython: profile=False
 # distutils: language = c++
-# cython: embedsignature = True
 # cython: language_level = 3
 
 from cython.operator cimport dereference as deref
@@ -31,10 +30,11 @@ from pyarrow.lib cimport (check_status, Field, MemoryPool, Schema,
                           RecordBatchReader, ensure_type,
                           maybe_unbox_memory_pool, get_input_stream,
                           get_writer, native_transcoding_input_stream,
-                          pyarrow_unwrap_batch, pyarrow_unwrap_table,
-                          pyarrow_wrap_schema, pyarrow_wrap_table,
-                          pyarrow_wrap_data_type, pyarrow_unwrap_data_type,
-                          Table, RecordBatch, StopToken)
+                          pyarrow_unwrap_batch, pyarrow_unwrap_schema,
+                          pyarrow_unwrap_table, pyarrow_wrap_schema,
+                          pyarrow_wrap_table, pyarrow_wrap_data_type,
+                          pyarrow_unwrap_data_type, Table, RecordBatch,
+                          StopToken, _CRecordBatchWriter)
 from pyarrow.lib import frombytes, tobytes, SignalStopHandler
 from pyarrow.util import _stringify_path
 
@@ -59,10 +59,10 @@ cdef class ReadOptions(_Weakrefable):
         This will determine multi-threading granularity as well as
         the size of individual record batches or table chunks.
         Minimum valid value for block size is 1
-    skip_rows: int, optional (default 0)
+    skip_rows : int, optional (default 0)
         The number of rows to skip before the column names (if any)
         and the CSV data.
-    skip_rows_after_names: int, optional (default 0)
+    skip_rows_after_names : int, optional (default 0)
         The number of rows to skip after the column names.
         This number can be larger than the number of rows in one
         block, and empty rows are counted.
@@ -70,15 +70,15 @@ cdef class ReadOptions(_Weakrefable):
         - `skip_rows` is applied (if non-zero);
         - column names aread (unless `column_names` is set);
         - `skip_rows_after_names` is applied (if non-zero).
-    column_names: list, optional
+    column_names : list, optional
         The column names of the target table.  If empty, fall back on
         `autogenerate_column_names`.
-    autogenerate_column_names: bool, optional (default False)
+    autogenerate_column_names : bool, optional (default False)
         Whether to autogenerate column names if `column_names` is empty.
         If true, column names will be of the form "f0", "f1"...
         If false, column names will be read from the first CSV row
         after `skip_rows`.
-    encoding: str, optional (default 'utf8')
+    encoding : str, optional (default 'utf8')
         The character encoding of the CSV data.  Columns that cannot
         decode using this encoding can still be read as Binary.
     """
@@ -235,22 +235,22 @@ cdef class ParseOptions(_Weakrefable):
 
     Parameters
     ----------
-    delimiter: 1-character string, optional (default ',')
+    delimiter : 1-character string, optional (default ',')
         The character delimiting individual cells in the CSV data.
-    quote_char: 1-character string or False, optional (default '"')
+    quote_char : 1-character string or False, optional (default '"')
         The character used optionally for quoting CSV values
         (False if quoting is not allowed).
-    double_quote: bool, optional (default True)
+    double_quote : bool, optional (default True)
         Whether two quotes in a quoted CSV value denote a single quote
         in the data.
-    escape_char: 1-character string or False, optional (default False)
+    escape_char : 1-character string or False, optional (default False)
         The character used optionally for escaping special characters
         (False if escaping is not allowed).
-    newlines_in_values: bool, optional (default False)
+    newlines_in_values : bool, optional (default False)
         Whether newline characters are allowed in CSV values.
         Setting this to True reduces the performance of multi-threaded
         CSV reading.
-    ignore_empty_lines: bool, optional (default True)
+    ignore_empty_lines : bool, optional (default True)
         Whether empty lines are ignored in CSV input.
         If False, an empty line is interpreted as containing a single empty
         value (assuming a one-column CSV file).
@@ -423,51 +423,53 @@ cdef class ConvertOptions(_Weakrefable):
     ----------
     check_utf8 : bool, optional (default True)
         Whether to check UTF8 validity of string columns.
-    column_types: pa.Schema or dict, optional
+    column_types : pa.Schema or dict, optional
         Explicitly map column names to column types. Passing this argument
         disables type inference on the defined columns.
-    null_values: list, optional
+    null_values : list, optional
         A sequence of strings that denote nulls in the data
         (defaults are appropriate in most cases). Note that by default,
         string columns are not checked for null values. To enable
         null checking for those, specify ``strings_can_be_null=True``.
-    true_values: list, optional
+    true_values : list, optional
         A sequence of strings that denote true booleans in the data
         (defaults are appropriate in most cases).
-    false_values: list, optional
+    false_values : list, optional
         A sequence of strings that denote false booleans in the data
         (defaults are appropriate in most cases).
-    timestamp_parsers: list, optional
+    decimal_point : 1-character string, optional (default '.')
+        The character used as decimal point in floating-point and decimal
+        data.
+    timestamp_parsers : list, optional
         A sequence of strptime()-compatible format strings, tried in order
         when attempting to infer or convert timestamp values (the special
         value ISO8601() can also be given).  By default, a fast built-in
         ISO-8601 parser is used.
-    strings_can_be_null: bool, optional (default False)
+    strings_can_be_null : bool, optional (default False)
         Whether string / binary columns can have null values.
         If true, then strings in null_values are considered null for
         string columns.
         If false, then all strings are valid string values.
-    quoted_strings_can_be_null: bool, optional (default True)
-        Whether string / binary columns can have quoted null values.
-        If true *and* strings_can_be_null is true, then strings in
-        null_values are considered null for string columns, even when
-        quoted.
-        Otherwise, then all quoted strings are valid string values.
-    auto_dict_encode: bool, optional (default False)
+    quoted_strings_can_be_null : bool, optional (default True)
+        Whether quoted values can be null.
+        If true, then strings in "null_values" are also considered null
+        when they appear quoted in the CSV file. Otherwise, quoted values
+        are never considered null.
+    auto_dict_encode : bool, optional (default False)
         Whether to try to automatically dict-encode string / binary data.
         If true, then when type inference detects a string or binary column,
         it it dict-encoded up to `auto_dict_max_cardinality` distinct values
         (per chunk), after which it switches to regular encoding.
         This setting is ignored for non-inferred columns (those in
         `column_types`).
-    auto_dict_max_cardinality: int, optional
+    auto_dict_max_cardinality : int, optional
         The maximum dictionary cardinality for `auto_dict_encode`.
         This value is per chunk.
-    include_columns: list, optional
+    include_columns : list, optional
         The names of columns to include in the Table.
         If empty, the Table will include all columns from the CSV file.
         If not empty, only these columns will be included, in this order.
-    include_missing_columns: bool, optional (default False)
+    include_missing_columns : bool, optional (default False)
         If false, columns in `include_columns` but not in the CSV file will
         error out.
         If true, columns in `include_columns` but not in the CSV file will
@@ -483,7 +485,7 @@ cdef class ConvertOptions(_Weakrefable):
             new CCSVConvertOptions(CCSVConvertOptions.Defaults()))
 
     def __init__(self, *, check_utf8=None, column_types=None, null_values=None,
-                 true_values=None, false_values=None,
+                 true_values=None, false_values=None, decimal_point=None,
                  strings_can_be_null=None, quoted_strings_can_be_null=None,
                  include_columns=None, include_missing_columns=None,
                  auto_dict_encode=None, auto_dict_max_cardinality=None,
@@ -498,6 +500,8 @@ cdef class ConvertOptions(_Weakrefable):
             self.true_values = true_values
         if false_values is not None:
             self.false_values = false_values
+        if decimal_point is not None:
+            self.decimal_point = decimal_point
         if strings_can_be_null is not None:
             self.strings_can_be_null = strings_can_be_null
         if quoted_strings_can_be_null is not None:
@@ -538,7 +542,7 @@ cdef class ConvertOptions(_Weakrefable):
     @property
     def quoted_strings_can_be_null(self):
         """
-        Whether string / binary columns can have quoted null values.
+        Whether quoted values can be null.
         """
         return deref(self.options).quoted_strings_can_be_null
 
@@ -606,6 +610,18 @@ cdef class ConvertOptions(_Weakrefable):
     @false_values.setter
     def false_values(self, value):
         deref(self.options).false_values = [tobytes(x) for x in value]
+
+    @property
+    def decimal_point(self):
+        """
+        The character used as decimal point in floating-point and decimal
+        data.
+        """
+        return chr(deref(self.options).decimal_point)
+
+    @decimal_point.setter
+    def decimal_point(self, value):
+        deref(self.options).decimal_point = _single_char(value)
 
     @property
     def auto_dict_encode(self):
@@ -717,6 +733,7 @@ cdef class ConvertOptions(_Weakrefable):
             self.null_values == other.null_values and
             self.true_values == other.true_values and
             self.false_values == other.false_values and
+            self.decimal_point == other.decimal_point and
             self.timestamp_parsers == other.timestamp_parsers and
             self.strings_can_be_null == other.strings_can_be_null and
             self.quoted_strings_can_be_null ==
@@ -730,17 +747,19 @@ cdef class ConvertOptions(_Weakrefable):
 
     def __getstate__(self):
         return (self.check_utf8, self.column_types, self.null_values,
-                self.true_values, self.false_values, self.timestamp_parsers,
-                self.strings_can_be_null, self.quoted_strings_can_be_null,
-                self.auto_dict_encode, self.auto_dict_max_cardinality,
-                self.include_columns, self.include_missing_columns)
+                self.true_values, self.false_values, self.decimal_point,
+                self.timestamp_parsers, self.strings_can_be_null,
+                self.quoted_strings_can_be_null, self.auto_dict_encode,
+                self.auto_dict_max_cardinality, self.include_columns,
+                self.include_missing_columns)
 
     def __setstate__(self, state):
         (self.check_utf8, self.column_types, self.null_values,
-         self.true_values, self.false_values, self.timestamp_parsers,
-         self.strings_can_be_null, self.quoted_strings_can_be_null,
-         self.auto_dict_encode, self.auto_dict_max_cardinality,
-         self.include_columns, self.include_missing_columns) = state
+         self.true_values, self.false_values, self.decimal_point,
+         self.timestamp_parsers, self.strings_can_be_null,
+         self.quoted_strings_can_be_null, self.auto_dict_encode,
+         self.auto_dict_max_cardinality, self.include_columns,
+         self.include_missing_columns) = state
 
     def __eq__(self, other):
         try:
@@ -829,20 +848,20 @@ def read_csv(input_file, read_options=None, parse_options=None,
 
     Parameters
     ----------
-    input_file: string, path or file-like object
+    input_file : string, path or file-like object
         The location of CSV data.  If a string or path, and if it ends
         with a recognized compressed file extension (e.g. ".gz" or ".bz2"),
         the data is automatically decompressed when reading.
-    read_options: pyarrow.csv.ReadOptions, optional
+    read_options : pyarrow.csv.ReadOptions, optional
         Options for the CSV reader (see pyarrow.csv.ReadOptions constructor
         for defaults)
-    parse_options: pyarrow.csv.ParseOptions, optional
+    parse_options : pyarrow.csv.ParseOptions, optional
         Options for the CSV parser
         (see pyarrow.csv.ParseOptions constructor for defaults)
-    convert_options: pyarrow.csv.ConvertOptions, optional
+    convert_options : pyarrow.csv.ConvertOptions, optional
         Options for converting CSV data
         (see pyarrow.csv.ConvertOptions constructor for defaults)
-    memory_pool: MemoryPool, optional
+    memory_pool : MemoryPool, optional
         Pool to allocate Table memory from
 
     Returns
@@ -887,20 +906,20 @@ def open_csv(input_file, read_options=None, parse_options=None,
 
     Parameters
     ----------
-    input_file: string, path or file-like object
+    input_file : string, path or file-like object
         The location of CSV data.  If a string or path, and if it ends
         with a recognized compressed file extension (e.g. ".gz" or ".bz2"),
         the data is automatically decompressed when reading.
-    read_options: pyarrow.csv.ReadOptions, optional
+    read_options : pyarrow.csv.ReadOptions, optional
         Options for the CSV reader (see pyarrow.csv.ReadOptions constructor
         for defaults)
-    parse_options: pyarrow.csv.ParseOptions, optional
+    parse_options : pyarrow.csv.ParseOptions, optional
         Options for the CSV parser
         (see pyarrow.csv.ParseOptions constructor for defaults)
-    convert_options: pyarrow.csv.ConvertOptions, optional
+    convert_options : pyarrow.csv.ConvertOptions, optional
         Options for converting CSV data
         (see pyarrow.csv.ConvertOptions constructor for defaults)
-    memory_pool: MemoryPool, optional
+    memory_pool : MemoryPool, optional
         Pool to allocate Table memory from
 
     Returns
@@ -937,14 +956,12 @@ cdef class WriteOptions(_Weakrefable):
         How many rows to process together when converting and writing
         CSV data
     """
-    cdef:
-        CCSVWriteOptions options
 
     # Avoid mistakingly creating attributes
     __slots__ = ()
 
     def __init__(self, *, include_header=None, batch_size=None):
-        self.options = CCSVWriteOptions.Defaults()
+        self.options.reset(new CCSVWriteOptions(CCSVWriteOptions.Defaults()))
         if include_header is not None:
             self.include_header = include_header
         if batch_size is not None:
@@ -955,11 +972,11 @@ cdef class WriteOptions(_Weakrefable):
         """
         Whether to write an initial header line with column names.
         """
-        return self.options.include_header
+        return deref(self.options).include_header
 
     @include_header.setter
     def include_header(self, value):
-        self.options.include_header = value
+        deref(self.options).include_header = value
 
     @property
     def batch_size(self):
@@ -967,21 +984,27 @@ cdef class WriteOptions(_Weakrefable):
         How many rows to process together when converting and writing
         CSV data.
         """
-        return self.options.batch_size
+        return deref(self.options).batch_size
 
     @batch_size.setter
     def batch_size(self, value):
-        self.options.batch_size = value
+        deref(self.options).batch_size = value
+
+    @staticmethod
+    cdef WriteOptions wrap(CCSVWriteOptions options):
+        out = WriteOptions()
+        out.options.reset(new CCSVWriteOptions(move(options)))
+        return out
 
     def validate(self):
-        check_status(self.options.Validate())
+        check_status(self.options.get().Validate())
 
 
 cdef _get_write_options(WriteOptions write_options, CCSVWriteOptions* out):
     if write_options is None:
         out[0] = CCSVWriteOptions.Defaults()
     else:
-        out[0] = write_options.options
+        out[0] = deref(write_options.options)
 
 
 def write_csv(data, output_file, write_options=None,
@@ -991,13 +1014,13 @@ def write_csv(data, output_file, write_options=None,
 
     Parameters
     ----------
-    data: pyarrow.RecordBatch or pyarrow.Table
+    data : pyarrow.RecordBatch or pyarrow.Table
         The data to write.
-    output_file: string, path, pyarrow.OutputStream or file-like object
+    output_file : string, path, pyarrow.NativeFile, or file-like object
         The location where to write the CSV data.
-    write_options: pyarrow.csv.WriteOptions
+    write_options : pyarrow.csv.WriteOptions
         Options to configure writing the CSV data.
-    memory_pool: MemoryPool, optional
+    memory_pool : MemoryPool, optional
         Pool for temporary allocations.
     """
     cdef:
@@ -1010,15 +1033,45 @@ def write_csv(data, output_file, write_options=None,
 
     get_writer(output_file, &stream)
     c_memory_pool = maybe_unbox_memory_pool(memory_pool)
+    c_write_options.io_context = CIOContext(c_memory_pool)
     if isinstance(data, RecordBatch):
         batch = pyarrow_unwrap_batch(data).get()
         with nogil:
-            check_status(WriteCSV(deref(batch), c_write_options, c_memory_pool,
-                                  stream.get()))
+            check_status(WriteCSV(deref(batch), c_write_options, stream.get()))
     elif isinstance(data, Table):
         table = pyarrow_unwrap_table(data).get()
         with nogil:
-            check_status(WriteCSV(deref(table), c_write_options, c_memory_pool,
-                                  stream.get()))
+            check_status(WriteCSV(deref(table), c_write_options, stream.get()))
     else:
         raise TypeError(f"Expected Table or RecordBatch, got '{type(data)}'")
+
+
+cdef class CSVWriter(_CRecordBatchWriter):
+    """
+    Writer to create a CSV file.
+
+    Parameters
+    ----------
+    sink : str, path, pyarrow.OutputStream or file-like object
+        The location where to write the CSV data.
+    schema : pyarrow.Schema
+        The schema of the data to be written.
+    write_options : pyarrow.csv.WriteOptions
+        Options to configure writing the CSV data.
+    memory_pool : MemoryPool, optional
+        Pool for temporary allocations.
+    """
+
+    def __init__(self, sink, Schema schema, *,
+                 WriteOptions write_options=None, MemoryPool memory_pool=None):
+        cdef:
+            shared_ptr[COutputStream] c_stream
+            shared_ptr[CSchema] c_schema = pyarrow_unwrap_schema(schema)
+            CCSVWriteOptions c_write_options
+            CMemoryPool* c_memory_pool = maybe_unbox_memory_pool(memory_pool)
+        _get_write_options(write_options, &c_write_options)
+        c_write_options.io_context = CIOContext(c_memory_pool)
+        get_writer(sink, &c_stream)
+        with nogil:
+            self.writer = GetResultValue(MakeCSVWriter(
+                c_stream, c_schema, c_write_options))

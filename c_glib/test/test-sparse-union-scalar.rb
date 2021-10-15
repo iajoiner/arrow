@@ -22,8 +22,14 @@ class TestSparseUnionScalar < Test::Unit::TestCase
       Arrow::Field.new("text", Arrow::StringDataType.new),
     ]
     @data_type = Arrow::SparseUnionDataType.new(fields, [2, 9])
+    @type_code = 2
     @value = Arrow::Int8Scalar.new(-29)
-    @scalar = Arrow::SparseUnionScalar.new(@data_type, @value)
+    @scalar = Arrow::SparseUnionScalar.new(@data_type, @type_code, @value)
+  end
+
+  def test_type_code
+    assert_equal(@type_code,
+                 @scalar.type_code)
   end
 
   def test_data_type
@@ -38,12 +44,12 @@ class TestSparseUnionScalar < Test::Unit::TestCase
   end
 
   def test_equal
-    assert_equal(Arrow::SparseUnionScalar.new(@data_type, @value),
+    assert_equal(Arrow::SparseUnionScalar.new(@data_type, @type_code, @value),
                  @scalar)
   end
 
   def test_to_s
-    assert_equal("...", @scalar.to_s)
+    assert_equal("union{number: int8 = -29}", @scalar.to_s)
   end
 
   def test_value

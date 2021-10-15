@@ -26,10 +26,9 @@ ARG jdk=8
 ARG go=1.15
 
 # Install Archery and integration dependencies
-COPY ci/conda_env_archery.yml /arrow/ci/
+COPY ci/conda_env_archery.txt /arrow/ci/
 RUN conda install -q \
-        --file arrow/ci/conda_env_cpp.yml \
-        --file arrow/ci/conda_env_archery.yml \
+        --file arrow/ci/conda_env_archery.txt \
         numpy \
         compilers \
         maven=${maven} \
@@ -49,6 +48,10 @@ ENV GOROOT=/opt/go \
     PATH=/opt/go/bin:$PATH
 RUN wget -nv -O - https://dl.google.com/go/go${go}.linux-${arch}.tar.gz | tar -xzf - -C /opt
 
+ENV DOTNET_ROOT=/opt/dotnet \
+    PATH=/opt/dotnet:$PATH
+RUN curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin -Channel 3.1 -InstallDir /opt/dotnet
+    
 ENV ARROW_BUILD_INTEGRATION=ON \
     ARROW_BUILD_STATIC=OFF \
     ARROW_BUILD_TESTS=OFF \

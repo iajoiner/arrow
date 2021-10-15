@@ -41,6 +41,11 @@ if [ "${ARROW_USE_CCACHE}" == "ON" ]; then
     ccache -s
 fi
 
+if [ "${ARROW_USE_TSAN}" == "ON" ] && [ ! -x "${ASAN_SYMBOLIZER_PATH}" ]; then
+    echo -e "Invalid value for \$ASAN_SYMBOLIZER_PATH: ${ASAN_SYMBOLIZER_PATH}"
+    exit 1
+fi
+
 mkdir -p ${build_dir}
 pushd ${build_dir}
 
@@ -69,6 +74,7 @@ cmake -G "${CMAKE_GENERATOR:-Ninja}" \
       -DARROW_GANDIVA_JAVA=${ARROW_GANDIVA_JAVA:-OFF} \
       -DARROW_GANDIVA_PC_CXX_FLAGS=${ARROW_GANDIVA_PC_CXX_FLAGS:-} \
       -DARROW_GANDIVA=${ARROW_GANDIVA:-OFF} \
+      -DARROW_GCS=${ARROW_GCS:-OFF} \
       -DARROW_HDFS=${ARROW_HDFS:-ON} \
       -DARROW_HIVESERVER2=${ARROW_HIVESERVER2:-OFF} \
       -DARROW_INSTALL_NAME_RPATH=${ARROW_INSTALL_NAME_RPATH:-ON} \
@@ -116,6 +122,7 @@ cmake -G "${CMAKE_GENERATOR:-Ninja}" \
       -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX:-${ARROW_HOME}} \
       -DCMAKE_UNITY_BUILD=${CMAKE_UNITY_BUILD:-OFF} \
       -Dgflags_SOURCE=${gflags_SOURCE:-} \
+      -Dgoogle_cloud_cpp_storage_SOURCE=${google_cloud_cpp_storage_SOURCE:-} \
       -DgRPC_SOURCE=${gRPC_SOURCE:-} \
       -DGTest_SOURCE=${GTest_SOURCE:-} \
       -DLz4_SOURCE=${Lz4_SOURCE:-} \

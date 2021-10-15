@@ -63,27 +63,37 @@ class Lexer {
       case IN_FIELD:
         goto InField;
       case AT_ESCAPE:
+        // will never reach here if escaping = false
+        // just to hint the compiler to remove dead code
+        if (!escaping) return nullptr;
         goto AtEscape;
       case IN_QUOTED_FIELD:
+        if (!quoting) return nullptr;
         goto InQuotedField;
       case AT_QUOTED_QUOTE:
+        if (!quoting) return nullptr;
         goto AtQuotedQuote;
       case AT_QUOTED_ESCAPE:
+        if (!quoting) return nullptr;
         goto AtQuotedEscape;
     }
 
   FieldStart:
-    // At the start of a field
-    if (ARROW_PREDICT_FALSE(data == data_end)) {
-      state_ = FIELD_START;
-      goto AbortLine;
-    }
-    // Quoting is only recognized at start of field
-    if (quoting && *data == options_.quote_char) {
-      data++;
-      goto InQuotedField;
-    } else {
+    if (!quoting) {
       goto InField;
+    } else {
+      // At the start of a field
+      if (ARROW_PREDICT_FALSE(data == data_end)) {
+        state_ = FIELD_START;
+        goto AbortLine;
+      }
+      // Quoting is only recognized at start of field
+      if (*data == options_.quote_char) {
+        data++;
+        goto InQuotedField;
+      } else {
+        goto InField;
+      }
     }
 
   InField:
@@ -110,7 +120,8 @@ class Lexer {
     if (ARROW_PREDICT_FALSE(c == '\n')) {
       goto LineEnd;
     }
-    if (ARROW_PREDICT_FALSE(c == options_.delimiter)) {
+    // treat delimiter as a normal token if quoting is disabled
+    if (ARROW_PREDICT_FALSE(quoting && c == options_.delimiter)) {
       goto FieldEnd;
     }
     goto InField;

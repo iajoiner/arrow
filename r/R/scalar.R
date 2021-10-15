@@ -23,7 +23,7 @@
 #' @docType class
 #'
 #' @description A `Scalar` holds a single value of an Arrow type.
-#' 
+#'
 #' @section Methods:
 #'   `$ToString()`: convert to a string
 #'   `$as_vector()`: convert to an R vector
@@ -31,7 +31,7 @@
 #'   `$Equals(other)`: is this Scalar equal to `other`
 #'   `$ApproxEquals(other)`: is this Scalar approximately equal to `other`
 #'   `$is_valid`: is this Scalar valid
-#'   `$null_count`: number of invalid values - 1 or 0 
+#'   `$null_count`: number of invalid values - 1 or 0
 #'   `$type`: Scalar type
 #'
 #' @name Scalar
@@ -41,14 +41,14 @@
 #' Scalar$create(404)
 #' # If you pass a vector into Scalar$create, you get a list containing your items
 #' Scalar$create(c(1, 2, 3))
-#' 
+#'
 #' # Comparisons
 #' my_scalar <- Scalar$create(99)
 #' my_scalar$ApproxEquals(Scalar$create(99.00001)) # FALSE
 #' my_scalar$ApproxEquals(Scalar$create(99.000009)) # TRUE
 #' my_scalar$Equals(Scalar$create(99.000009)) # FALSE
 #' my_scalar$Equals(Scalar$create(99L)) # FALSE (types don't match)
-#' 
+#'
 #' my_scalar$ToString()
 #' @export
 Scalar <- R6Class("Scalar",
@@ -58,7 +58,7 @@ Scalar <- R6Class("Scalar",
     ToString = function() Scalar__ToString(self),
     type_id = function() Scalar__type(self)$id,
     as_vector = function() Scalar__as_vector(self),
-    as_array = function() MakeArrayFromScalar(self),
+    as_array = function(length = 1L) MakeArrayFromScalar(self, as.integer(length)),
     Equals = function(other, ...) {
       inherits(other, "Scalar") && Scalar__Equals(self, other)
     },

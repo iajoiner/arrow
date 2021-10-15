@@ -82,16 +82,30 @@ class ARROW_EXPORT Executor {
 
   // Spawn a fire-and-forget task.
   template <typename Function>
-  Status Spawn(Function&& func, StopToken stop_token = StopToken::Unstoppable()) {
+  Status Spawn(Function&& func) {
+    return SpawnReal(TaskHints{}, std::forward<Function>(func), StopToken::Unstoppable(),
+                     StopCallback{});
+  }
+  template <typename Function>
+  Status Spawn(Function&& func, StopToken stop_token) {
     return SpawnReal(TaskHints{}, std::forward<Function>(func), std::move(stop_token),
                      StopCallback{});
   }
-
   template <typename Function>
-  Status Spawn(TaskHints hints, Function&& func,
-               StopToken stop_token = StopToken::Unstoppable()) {
+  Status Spawn(TaskHints hints, Function&& func) {
+    return SpawnReal(hints, std::forward<Function>(func), StopToken::Unstoppable(),
+                     StopCallback{});
+  }
+  template <typename Function>
+  Status Spawn(TaskHints hints, Function&& func, StopToken stop_token) {
     return SpawnReal(hints, std::forward<Function>(func), std::move(stop_token),
                      StopCallback{});
+  }
+  template <typename Function>
+  Status Spawn(TaskHints hints, Function&& func, StopToken stop_token,
+               StopCallback stop_callback) {
+    return SpawnReal(hints, std::forward<Function>(func), std::move(stop_token),
+                     std::move(stop_callback));
   }
 
   // Transfers a future to this executor.  Any continuations added to the
@@ -179,6 +193,10 @@ class ARROW_EXPORT Executor {
   // concurrently).  This may be an approximate number.
   virtual int GetCapacity() = 0;
 
+  // Return true if the thread from which this function is called is owned by this
+  // Executor. Returns false if this Executor does not support this property.
+  virtual bool OwnsThisThread() { return false; }
+
  protected:
   ARROW_DISALLOW_COPY_AND_ASSIGN(Executor);
 
@@ -233,7 +251,7 @@ class ARROW_EXPORT SerialExecutor : public Executor {
   template <typename T = ::arrow::internal::Empty>
   using TopLevelTask = internal::FnOnce<Future<T>(Executor*)>;
 
-  ~SerialExecutor();
+  ~SerialExecutor() override;
 
   int GetCapacity() override { return 1; };
   Status SpawnReal(TaskHints hints, FnOnce<void()> task, StopToken,
@@ -298,6 +316,8 @@ class ARROW_EXPORT ThreadPool : public Executor {
   // match this value.
   int GetCapacity() override;
 
+  bool OwnsThisThread() override;
+
   // Return the number of tasks either running or in the queue.
   int GetNumTasks();
 
@@ -320,6 +340,11 @@ class ARROW_EXPORT ThreadPool : public Executor {
   // If "wait" is false, workers are stopped as soon as currently executing
   // tasks are finished.
   Status Shutdown(bool wait = true);
+
+  // Wait for the thread pool to become idle
+  //
+  // This is useful for sequencing tests
+  void WaitForIdle();
 
   struct State;
 

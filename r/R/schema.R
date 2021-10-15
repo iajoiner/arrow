@@ -112,7 +112,8 @@ Schema <- R6Class("Schema",
     },
     Equals = function(other, check_metadata = FALSE, ...) {
       inherits(other, "Schema") && Schema__Equals(self, other, isTRUE(check_metadata))
-    }
+    },
+    export_to_c = function(ptr) ExportSchema(self, ptr)
   ),
   active = list(
     names = function() {
@@ -132,10 +133,36 @@ Schema <- R6Class("Schema",
         self$set_pointer(out$pointer())
         self
       }
+    },
+    r_metadata = function(new) {
+      # Helper for the R metadata that handles the serialization
+      # See also method on ArrowTabular
+      if (missing(new)) {
+        out <- self$metadata$r
+        if (!is.null(out)) {
+          # Can't unserialize NULL
+          out <- .unserialize_arrow_r_metadata(out)
+        }
+        # Returns either NULL or a named list
+        out
+      } else {
+        # Set the R metadata
+        self$metadata$r <- .serialize_arrow_r_metadata(new)
+        self
+      }
     }
   )
 )
-Schema$create <- function(...) schema_(.fields(list2(...)))
+Schema$create <- function(...) {
+  .list <- list2(...)
+  if (all(map_lgl(.list, ~ inherits(., "Field")))) {
+    schema_(.list)
+  } else {
+    schema_(.fields(.list))
+  }
+}
+#' @include arrowExports.R
+Schema$import_from_c <- ImportSchema
 
 prepare_key_value_metadata <- function(metadata) {
   # key-value-metadata must be a named character vector;
@@ -155,10 +182,11 @@ prepare_key_value_metadata <- function(metadata) {
 
 print_schema_fields <- function(s) {
   # Alternative to Schema__ToString that doesn't print metadata
-  paste(map_chr(s$fields, ~.$ToString()), collapse = "\n")
+  paste(map_chr(s$fields, ~ .$ToString()), collapse = "\n")
 }
 
-#' @param ... named list of [data types][data-type]
+#' @param ... named list containing [data types][data-type] or
+#'   a list of [fields][field] containing the fields for the schema
 #' @export
 #' @rdname Schema
 schema <- Schema$create
@@ -233,7 +261,7 @@ length.Schema <- function(x) x$num_fields
       i <- setdiff(seq_len(length(x)), -1 * i)
     }
   }
-  fields <- map(i, ~x[[.]])
+  fields <- map(i, ~ x[[.]])
   invalid <- map_lgl(fields, is.null)
   if (any(invalid)) {
     stop(
@@ -280,13 +308,17 @@ read_schema <- function(stream, ...) {
 #'
 #' @param ... [Schema]s to unify
 #' @param schemas Alternatively, a list of schemas
-#' @return A `Schema` with the union of fields contained in the inputs
+#' @return A `Schema` with the union of fields contained in the inputs, or
+#'   `NULL` if any of `schemas` is `NULL`
 #' @export
 #' @examplesIf arrow_available()
 #' a <- schema(b = double(), c = bool())
 #' z <- schema(b = double(), k = utf8())
 #' unify_schemas(a, z)
 unify_schemas <- function(..., schemas = list(...)) {
+  if (any(vapply(schemas, is.null, TRUE))) {
+    return(NULL)
+  }
   arrow__UnifySchemas(schemas)
 }
 

@@ -43,9 +43,22 @@
 #include <arrow/filesystem/type_fwd.h>
 #include <arrow/io/type_fwd.h>
 #include <arrow/ipc/type_fwd.h>
+
+#if defined(ARROW_R_WITH_JSON)
 #include <arrow/json/type_fwd.h>
+#endif
+
 #include <arrow/type_fwd.h>
 #include <arrow/util/type_fwd.h>
+
+namespace arrow {
+namespace compute {
+
+class ExecPlan;
+class ExecNode;
+
+}  // namespace compute
+}  // namespace arrow
 
 #if defined(ARROW_R_WITH_PARQUET)
 #include <parquet/type_fwd.h>
@@ -58,10 +71,9 @@ namespace ds = ::arrow::dataset;
 namespace compute = ::arrow::compute;
 namespace fs = ::arrow::fs;
 
-SEXP ChunkedArray__as_vector(const std::shared_ptr<arrow::ChunkedArray>& chunked_array);
-SEXP Array__as_vector(const std::shared_ptr<arrow::Array>& array);
 std::shared_ptr<arrow::RecordBatch> RecordBatch__from_arrays(SEXP, SEXP);
 arrow::MemoryPool* gc_memory_pool();
+arrow::compute::ExecContext* gc_context();
 
 #if (R_VERSION < R_Version(3, 5, 0))
 #define LOGICAL_RO(x) ((const int*)LOGICAL(x))
@@ -93,6 +105,7 @@ auto ValueOrStop(R&& result) -> decltype(std::forward<R>(result).ValueOrDie()) {
 }
 
 namespace r {
+class RTasks;
 
 std::shared_ptr<arrow::DataType> InferArrowType(SEXP x);
 std::shared_ptr<arrow::Array> vec_to_arrow__reuse_memory(SEXP x);
@@ -165,6 +178,16 @@ arrow::Status InferSchemaFromDots(SEXP lst, SEXP schema_sxp, int num_fields,
 arrow::Status AddMetadataFromDots(SEXP lst, int num_fields,
                                   std::shared_ptr<arrow::Schema>& schema);
 
+namespace altrep {
+
+#if defined(HAS_ALTREP)
+void Init_Altrep_classes(DllInfo* dll);
+#endif
+
+SEXP MakeAltrepVector(const std::shared_ptr<ChunkedArray>& chunked_array);
+
+}  // namespace altrep
+
 }  // namespace r
 }  // namespace arrow
 
@@ -202,9 +225,11 @@ R6_CLASS_NAME(parquet::arrow::FileWriter, "ParquetFileWriter");
 
 R6_CLASS_NAME(arrow::ipc::feather::Reader, "FeatherReader");
 
+#if defined(ARROW_R_WITH_JSON)
 R6_CLASS_NAME(arrow::json::ReadOptions, "JsonReadOptions");
 R6_CLASS_NAME(arrow::json::ParseOptions, "JsonParseOptions");
 R6_CLASS_NAME(arrow::json::TableReader, "JsonTableReader");
+#endif
 
 #undef R6_CLASS_NAME
 

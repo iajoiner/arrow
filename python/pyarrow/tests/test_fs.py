@@ -20,18 +20,22 @@ import gzip
 import os
 import pathlib
 import pickle
+import subprocess
 import sys
+import time
 
 import pytest
 import weakref
 
 import pyarrow as pa
 from pyarrow.tests.test_io import assert_file_not_found
+from pyarrow.tests.util import _filesystem_uri
 from pyarrow.vendored.version import Version
 
 from pyarrow.fs import (FileType, FileInfo, FileSelector, FileSystem,
                         LocalFileSystem, SubTreeFileSystem, _MockFileSystem,
-                        FileSystemHandler, PyFileSystem, FSSpecHandler)
+                        FileSystemHandler, PyFileSystem, FSSpecHandler,
+                        copy_files)
 
 
 class DummyHandler(FileSystemHandler):
@@ -205,7 +209,6 @@ def localfs(request, tempdir):
     return dict(
         fs=LocalFileSystem(),
         pathfn=lambda p: (tempdir / p).as_posix(),
-        allow_copy_file=True,
         allow_move_dir=True,
         allow_append_to_file=True,
     )
@@ -216,7 +219,6 @@ def py_localfs(request, tempdir):
     return dict(
         fs=PyFileSystem(ProxyHandler(LocalFileSystem())),
         pathfn=lambda p: (tempdir / p).as_posix(),
-        allow_copy_file=True,
         allow_move_dir=True,
         allow_append_to_file=True,
     )
@@ -227,7 +229,6 @@ def mockfs(request):
     return dict(
         fs=_MockFileSystem(),
         pathfn=lambda p: p,
-        allow_copy_file=True,
         allow_move_dir=True,
         allow_append_to_file=True,
     )
@@ -238,7 +239,6 @@ def py_mockfs(request):
     return dict(
         fs=PyFileSystem(ProxyHandler(_MockFileSystem())),
         pathfn=lambda p: p,
-        allow_copy_file=True,
         allow_move_dir=True,
         allow_append_to_file=True,
     )
@@ -249,7 +249,6 @@ def localfs_with_mmap(request, tempdir):
     return dict(
         fs=LocalFileSystem(use_mmap=True),
         pathfn=lambda p: (tempdir / p).as_posix(),
-        allow_copy_file=True,
         allow_move_dir=True,
         allow_append_to_file=True,
     )
@@ -260,18 +259,17 @@ def subtree_localfs(request, tempdir, localfs):
     return dict(
         fs=SubTreeFileSystem(str(tempdir), localfs['fs']),
         pathfn=lambda p: p,
-        allow_copy_file=True,
         allow_move_dir=True,
         allow_append_to_file=True,
     )
 
 
 @pytest.fixture
-def s3fs(request, s3_connection, s3_server):
+def s3fs(request, s3_server):
     request.config.pyarrow.requires('s3')
     from pyarrow.fs import S3FileSystem
 
-    host, port, access_key, secret_key = s3_connection
+    host, port, access_key, secret_key = s3_server['connection']
     bucket = 'pyarrow-filesystem/'
 
     fs = S3FileSystem(
@@ -285,7 +283,6 @@ def s3fs(request, s3_connection, s3_server):
     yield dict(
         fs=fs,
         pathfn=bucket.__add__,
-        allow_copy_file=True,
         allow_move_dir=False,
         allow_append_to_file=False,
     )
@@ -298,10 +295,107 @@ def subtree_s3fs(request, s3fs):
     return dict(
         fs=SubTreeFileSystem(prefix, s3fs['fs']),
         pathfn=prefix.__add__,
-        allow_copy_file=True,
         allow_move_dir=False,
         allow_append_to_file=False,
     )
+
+
+_minio_limited_policy = """{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListAllMyBuckets",
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:ListBucket",
+                "s3:PutObjectTagging",
+                "s3:DeleteObject",
+                "s3:GetObjectVersion"
+            ],
+            "Resource": [
+                "arn:aws:s3:::*"
+            ]
+        }
+    ]
+}"""
+
+
+def _run_mc_command(mcdir, *args):
+    full_args = ['mc', '-C', mcdir] + list(args)
+    proc = subprocess.Popen(full_args, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, encoding='utf-8')
+    retval = proc.wait(10)
+    cmd_str = ' '.join(full_args)
+    print(f'Cmd: {cmd_str}')
+    print(f'  Return: {retval}')
+    print(f'  Stdout: {proc.stdout.read()}')
+    print(f'  Stderr: {proc.stderr.read()}')
+    if retval != 0:
+        raise ChildProcessError("Could not run mc")
+
+
+def _wait_for_minio_startup(mcdir, address, access_key, secret_key):
+    start = time.time()
+    while time.time() - start < 10:
+        try:
+            _run_mc_command(mcdir, 'alias', 'set', 'myminio',
+                            f'http://{address}', access_key, secret_key)
+            return
+        except ChildProcessError:
+            time.sleep(1)
+    raise Exception("mc command could not connect to local minio")
+
+
+def _configure_limited_user(tmpdir, address, access_key, secret_key):
+    """
+    Attempts to use the mc command to configure the minio server
+    with a special user limited:limited123 which does not have
+    permission to create buckets.  This mirrors some real life S3
+    configurations where users are given strict permissions.
+
+    Arrow S3 operations should still work in such a configuration
+    (e.g. see ARROW-13685)
+    """
+    try:
+        mcdir = os.path.join(tmpdir, 'mc')
+        os.mkdir(mcdir)
+        policy_path = os.path.join(tmpdir, 'limited-buckets-policy.json')
+        with open(policy_path, mode='w') as policy_file:
+            policy_file.write(_minio_limited_policy)
+        # The s3_server fixture starts the minio process but
+        # it takes a few moments for the process to become available
+        _wait_for_minio_startup(mcdir, address, access_key, secret_key)
+        # These commands create a limited user with a specific
+        # policy and creates a sample bucket for that user to
+        # write to
+        _run_mc_command(mcdir, 'admin', 'policy', 'add',
+                        'myminio/', 'no-create-buckets', policy_path)
+        _run_mc_command(mcdir, 'admin', 'user', 'add',
+                        'myminio/', 'limited', 'limited123')
+        _run_mc_command(mcdir, 'admin', 'policy', 'set',
+                        'myminio', 'no-create-buckets', 'user=limited')
+        _run_mc_command(mcdir, 'mb', 'myminio/existing-bucket')
+        return True
+    except FileNotFoundError:
+        # If mc is not found, skip these tests
+        return False
+
+
+@pytest.fixture(scope='session')
+def limited_s3_user(request, s3_server):
+    if sys.platform == 'win32':
+        # Can't rely on FileNotFound check because
+        # there is sometimes an mc command on Windows
+        # which is unrelated to the minio mc
+        pytest.skip('The mc command is not installed on Windows')
+    request.config.pyarrow.requires('s3')
+    tempdir = s3_server['tempdir']
+    host, port, access_key, secret_key = s3_server['connection']
+    address = '{}:{}'.format(host, port)
+    if not _configure_limited_user(tempdir, address, access_key, secret_key):
+        pytest.skip('Could not locate mc command to configure limited user')
 
 
 @pytest.fixture
@@ -318,7 +412,6 @@ def hdfs(request, hdfs_connection):
     return dict(
         fs=fs,
         pathfn=lambda p: p,
-        allow_copy_file=False,
         allow_move_dir=True,
         allow_append_to_file=True,
     )
@@ -331,7 +424,6 @@ def py_fsspec_localfs(request, tempdir):
     return dict(
         fs=PyFileSystem(FSSpecHandler(fs)),
         pathfn=lambda p: (tempdir / p).as_posix(),
-        allow_copy_file=True,
         allow_move_dir=True,
         allow_append_to_file=True,
     )
@@ -347,20 +439,19 @@ def py_fsspec_memoryfs(request, tempdir):
     return dict(
         fs=PyFileSystem(FSSpecHandler(fs)),
         pathfn=lambda p: p,
-        allow_copy_file=True,
         allow_move_dir=True,
         allow_append_to_file=True,
     )
 
 
 @pytest.fixture
-def py_fsspec_s3fs(request, s3_connection, s3_server):
+def py_fsspec_s3fs(request, s3_server):
     s3fs = pytest.importorskip("s3fs")
     if (sys.version_info < (3, 7) and
             Version(s3fs.__version__) >= Version("0.5")):
         pytest.skip("s3fs>=0.5 version is async and requires Python >= 3.7")
 
-    host, port, access_key, secret_key = s3_connection
+    host, port, access_key, secret_key = s3_server['connection']
     bucket = 'pyarrow-filesystem/'
 
     fs = s3fs.S3FileSystem(
@@ -374,7 +465,6 @@ def py_fsspec_s3fs(request, s3_connection, s3_server):
     yield dict(
         fs=fs,
         pathfn=bucket.__add__,
-        allow_copy_file=True,
         allow_move_dir=False,
         allow_append_to_file=True,
     )
@@ -396,11 +486,13 @@ def py_fsspec_s3fs(request, s3_connection, s3_server):
     ),
     pytest.param(
         pytest.lazy_fixture('s3fs'),
-        id='S3FileSystem'
+        id='S3FileSystem',
+        marks=pytest.mark.s3
     ),
     pytest.param(
         pytest.lazy_fixture('hdfs'),
-        id='HadoopFileSystem'
+        id='HadoopFileSystem',
+        marks=pytest.mark.hdfs
     ),
     pytest.param(
         pytest.lazy_fixture('mockfs'),
@@ -424,7 +516,8 @@ def py_fsspec_s3fs(request, s3_connection, s3_server):
     ),
     pytest.param(
         pytest.lazy_fixture('py_fsspec_s3fs'),
-        id='PyFileSystem(FSSpecHandler(s3fs.S3FileSystem()))'
+        id='PyFileSystem(FSSpecHandler(s3fs.S3FileSystem()))',
+        marks=pytest.mark.s3
     ),
 ])
 def filesystem_config(request):
@@ -444,11 +537,6 @@ def pathfn(request, filesystem_config):
 @pytest.fixture
 def allow_move_dir(request, filesystem_config):
     return filesystem_config['allow_move_dir']
-
-
-@pytest.fixture
-def allow_copy_file(request, filesystem_config):
-    return filesystem_config['allow_copy_file']
 
 
 @pytest.fixture
@@ -483,6 +571,21 @@ def check_mtime_or_absent(file_info):
 def skip_fsspec_s3fs(fs):
     if fs.type_name == "py::fsspec+s3":
         pytest.xfail(reason="Not working with fsspec's s3fs")
+
+
+@pytest.mark.s3
+def test_s3fs_limited_permissions_create_bucket(s3_server, limited_s3_user):
+    from pyarrow.fs import S3FileSystem
+
+    host, port, _, _ = s3_server['connection']
+
+    fs = S3FileSystem(
+        access_key='limited',
+        secret_key='limited123',
+        endpoint_override='{}:{}'.format(host, port),
+        scheme='http'
+    )
+    fs.create_dir('existing-bucket/test')
 
 
 def test_file_info_constructor():
@@ -804,20 +907,16 @@ def test_delete_root_dir_contents(mockfs, py_mockfs):
     _check_root_dir_contents(py_mockfs)
 
 
-def test_copy_file(fs, pathfn, allow_copy_file):
+def test_copy_file(fs, pathfn):
     s = pathfn('test-copy-source-file')
     t = pathfn('test-copy-target-file')
 
     with fs.open_output_stream(s):
         pass
 
-    if allow_copy_file:
-        fs.copy_file(s, t)
-        fs.delete_file(s)
-        fs.delete_file(t)
-    else:
-        with pytest.raises(pa.ArrowNotImplementedError):
-            fs.copy_file(s, t)
+    fs.copy_file(s, t)
+    fs.delete_file(s)
+    fs.delete_file(t)
 
 
 def test_move_directory(fs, pathfn, allow_move_dir):
@@ -876,6 +975,7 @@ def identity(v):
     return v
 
 
+@pytest.mark.gzip
 @pytest.mark.parametrize(
     ('compression', 'buffer_size', 'compressor'),
     [
@@ -913,6 +1013,7 @@ def test_open_input_file(fs, pathfn):
     assert result == data[read_from:]
 
 
+@pytest.mark.gzip
 @pytest.mark.parametrize(
     ('compression', 'buffer_size', 'decompressor'),
     [
@@ -934,6 +1035,7 @@ def test_open_output_stream(fs, pathfn, compression, buffer_size,
         assert f.read(len(data)) == data
 
 
+@pytest.mark.gzip
 @pytest.mark.parametrize(
     ('compression', 'buffer_size', 'compressor', 'decompressor'),
     [
@@ -943,6 +1045,7 @@ def test_open_output_stream(fs, pathfn, compression, buffer_size,
         ('gzip', 256, gzip.compress, gzip.decompress),
     ]
 )
+@pytest.mark.filterwarnings("ignore::FutureWarning")
 def test_open_append_stream(fs, pathfn, compression, buffer_size, compressor,
                             decompressor, allow_append_to_file):
     p = pathfn('open-append-stream')
@@ -1331,10 +1434,10 @@ def test_filesystem_from_path_object(path):
 
 
 @pytest.mark.s3
-def test_filesystem_from_uri_s3(s3_connection, s3_server):
+def test_filesystem_from_uri_s3(s3_server):
     from pyarrow.fs import S3FileSystem
 
-    host, port, access_key, secret_key = s3_connection
+    host, port, access_key, secret_key = s3_server['connection']
 
     uri = "s3://{}:{}@mybucket/foo/bar?scheme=http&endpoint_override={}:{}" \
         .format(access_key, secret_key, host, port)
@@ -1510,6 +1613,7 @@ def test_py_open_output_stream():
         f.write(b"data")
 
 
+@pytest.mark.filterwarnings("ignore::FutureWarning")
 def test_py_open_append_stream():
     fs = PyFileSystem(DummyHandler())
 
@@ -1560,3 +1664,108 @@ def test_s3_real_aws_region_selection():
     fs, path = FileSystem.from_uri(
         's3://x-arrow-non-existent-bucket?region=us-east-3')
     assert fs.region == 'us-east-3'
+
+
+@pytest.mark.s3
+def test_copy_files(s3_connection, s3fs, tempdir):
+    fs = s3fs["fs"]
+    pathfn = s3fs["pathfn"]
+
+    # create test file on S3 filesystem
+    path = pathfn('c.txt')
+    with fs.open_output_stream(path) as f:
+        f.write(b'test')
+
+    # create URI for created file
+    host, port, access_key, secret_key = s3_connection
+    source_uri = (
+        f"s3://{access_key}:{secret_key}@{path}"
+        f"?scheme=http&endpoint_override={host}:{port}"
+    )
+    # copy from S3 URI to local file
+    local_path1 = str(tempdir / "c_copied1.txt")
+    copy_files(source_uri, local_path1)
+
+    localfs = LocalFileSystem()
+    with localfs.open_input_stream(local_path1) as f:
+        assert f.read() == b"test"
+
+    # copy from S3 path+filesystem to local file
+    local_path2 = str(tempdir / "c_copied2.txt")
+    copy_files(path, local_path2, source_filesystem=fs)
+    with localfs.open_input_stream(local_path2) as f:
+        assert f.read() == b"test"
+
+    # copy to local file with URI
+    local_path3 = str(tempdir / "c_copied3.txt")
+    destination_uri = _filesystem_uri(local_path3)  # file://
+    copy_files(source_uri, destination_uri)
+
+    with localfs.open_input_stream(local_path3) as f:
+        assert f.read() == b"test"
+
+    # copy to local file with path+filesystem
+    local_path4 = str(tempdir / "c_copied4.txt")
+    copy_files(source_uri, local_path4, destination_filesystem=localfs)
+
+    with localfs.open_input_stream(local_path4) as f:
+        assert f.read() == b"test"
+
+    # copy with additional options
+    local_path5 = str(tempdir / "c_copied5.txt")
+    copy_files(source_uri, local_path5, chunk_size=1, use_threads=False)
+
+    with localfs.open_input_stream(local_path5) as f:
+        assert f.read() == b"test"
+
+
+def test_copy_files_directory(tempdir):
+    localfs = LocalFileSystem()
+
+    # create source directory with 2 files
+    source_dir = tempdir / "source"
+    source_dir.mkdir()
+    with localfs.open_output_stream(str(source_dir / "file1")) as f:
+        f.write(b'test1')
+    with localfs.open_output_stream(str(source_dir / "file2")) as f:
+        f.write(b'test2')
+
+    def check_copied_files(destination_dir):
+        with localfs.open_input_stream(str(destination_dir / "file1")) as f:
+            assert f.read() == b"test1"
+        with localfs.open_input_stream(str(destination_dir / "file2")) as f:
+            assert f.read() == b"test2"
+
+    # Copy directory with local file paths
+    destination_dir1 = tempdir / "destination1"
+    # TODO need to create?
+    destination_dir1.mkdir()
+    copy_files(str(source_dir), str(destination_dir1))
+    check_copied_files(destination_dir1)
+
+    # Copy directory with path+filesystem
+    destination_dir2 = tempdir / "destination2"
+    destination_dir2.mkdir()
+    copy_files(str(source_dir), str(destination_dir2),
+               source_filesystem=localfs, destination_filesystem=localfs)
+    check_copied_files(destination_dir2)
+
+    # Copy directory with URI
+    destination_dir3 = tempdir / "destination3"
+    destination_dir3.mkdir()
+    source_uri = _filesystem_uri(str(source_dir))  # file://
+    destination_uri = _filesystem_uri(str(destination_dir3))
+    copy_files(source_uri, destination_uri)
+    check_copied_files(destination_dir3)
+
+    # Copy directory with Path objects
+    destination_dir4 = tempdir / "destination4"
+    destination_dir4.mkdir()
+    copy_files(source_dir, destination_dir4)
+    check_copied_files(destination_dir4)
+
+    # copy with additional non-default options
+    destination_dir5 = tempdir / "destination5"
+    destination_dir5.mkdir()
+    copy_files(source_dir, destination_dir5, chunk_size=1, use_threads=False)
+    check_copied_files(destination_dir5)
